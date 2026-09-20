@@ -1,0 +1,85 @@
+# typecheck -> test -> build food index -> Vite build -> deploy to Pages.
+#
+# The USDA subset is generated in CI rather than committed, which keeps the
+# repo small and the derivation reproducible. The step is optional: when no
+# FoodData Central export is available the app ships on the curated table,
+# which is the intended fallback rather than a failure.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # Tier 2. Set the FDC_URL secret to a zip of the FoodData Central
+      # Foundation and SR Legacy JSON exports to include it in the build.
+      # Without it the step is skipped and the app uses tier 1 alone.
+      - name: Build USDA food index
+        if: ${{ env.FDC_URL != '' }}
+        env:
+          FDC_URL: ${{ secrets.FDC_URL }}
+        run: |
+          mkdir -p .fdc
+          curl -sSL "$FDC_URL" -o .fdc/fdc.zip
+          unzip -q .fdc/fdc.zip -d .fdc
+          npm run build:food-index -- --input .fdc --out public/usda-subset.bin
+
+      - name: Build
+        env:
+          # GitHub Pages serves a project site from /<repo>/.
+          VITE_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

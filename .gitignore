@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-ssr/
+.DS_Store
+*.local
+.vite/
+
+# Build artefact, generated in CI from FoodData Central. Never committed.
+data/usda-subset.bin
+data/usda-subset.meta.json
+public/usda-subset.bin
+public/usda-subset.meta.json
+scripts/.fdc-cache/
