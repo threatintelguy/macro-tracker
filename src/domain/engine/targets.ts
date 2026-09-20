@@ -285,12 +285,59 @@ export function resolveTargets(input: ResolveTargetsInput): ResolvedTargets {
   })
 
   return {
-    targets: clampResult.targets,
+    targets: syncDerivedSecondaries(clampResult.targets, settings),
     maintenanceKcal,
     maintenanceSource,
     bmr,
     clamped: clampResult.clamped,
   }
+}
+
+/**
+ * Re-derive the percentage-based ceilings from the FINAL calorie target.
+ *
+ * Saturated fat and added sugar are shares of energy, so they have to follow
+ * whatever energy survived clamping. Deriving them earlier and leaving them
+ * there would quote a ceiling against a calorie figure the app then refused
+ * to honour -- a user who asks for 1200 kcal and is held at 2205 must not be
+ * shown a saturated-fat ceiling computed from the 1200.
+ *
+ * A ceiling the user set by hand is left exactly as they set it.
+ */
+export function syncDerivedSecondaries(
+  targets: TargetSet,
+  settings: Pick<Settings, 'secondary'>,
+): TargetSet {
+  const kcal = targets.kcal.value
+  const out: TargetSet = { ...targets }
+
+  if (out.satFat.source !== 'user') {
+    const value = gramsFromPctKcal(
+      settings.secondary.satFatPctKcal,
+      kcal,
+      KCAL_PER_G.fat,
+    )
+    out.satFat = {
+      ...out.satFat,
+      value,
+      rationale: `${settings.secondary.satFatPctKcal}% of ${Math.round(kcal)} kcal, the standard population guideline. Moves with the calorie target.`,
+    }
+  }
+
+  if (out.addedSugar.source !== 'user') {
+    const value = gramsFromPctKcal(
+      settings.secondary.addedSugarPctKcal,
+      kcal,
+      KCAL_PER_G.carbs,
+    )
+    out.addedSugar = {
+      ...out.addedSugar,
+      value,
+      rationale: `${settings.secondary.addedSugarPctKcal}% of ${Math.round(kcal)} kcal. Moves with the calorie target.`,
+    }
+  }
+
+  return out
 }
 
 /**
@@ -333,16 +380,10 @@ export function applyOverrides(
     }
   }
 
-  // Percentage-derived secondary targets follow an edited calorie figure.
-  if (latest.has('kcal') && !latest.has('satFat')) {
-    out.satFat = { ...out.satFat, value: (out.kcal.value * 0.1) / KCAL_PER_G.fat }
-  }
-  if (latest.has('kcal') && !latest.has('addedSugar')) {
-    out.addedSugar = {
-      ...out.addedSugar,
-      value: (out.kcal.value * 0.1) / KCAL_PER_G.carbs,
-    }
-  }
+  // The percentage-derived ceilings are NOT recomputed here. They follow the
+  // final calorie target, which is only known after clamping, so
+  // syncDerivedSecondaries owns them -- and it reads the configured
+  // percentage rather than assuming ten.
 
   return out
 }

@@ -271,6 +271,57 @@ describe('resolveTargets', () => {
     expect(targets.kcal.source).toBe('clamped')
   })
 
+  it('derives the percentage ceilings from the clamped calorie target', () => {
+    // Regression: asking for 1200 kcal is held at the deficit floor, and the
+    // saturated-fat ceiling must follow the figure the app will honour --
+    // not the one it refused.
+    const r = resolveTargets({
+      profile: PROFILE,
+      weightKg: WEIGHT,
+      settings: settings({
+        overrides: [{ key: 'kcal', value: 1200, setAt: NOW }],
+      }),
+      now: NOW,
+    })
+    const finalKcal = r.targets.kcal.value
+    expect(finalKcal).toBeGreaterThan(2000)
+    expect(r.targets.satFat.value).toBeCloseTo((finalKcal * 0.1) / 9, 4)
+    expect(r.targets.addedSugar.value).toBeCloseTo((finalKcal * 0.1) / 4, 4)
+    // And the rationale quotes the honoured figure, not the rejected one.
+    expect(r.targets.satFat.rationale).toContain(String(Math.round(finalKcal)))
+    expect(r.targets.satFat.rationale).not.toContain('1200')
+  })
+
+  it('leaves a hand-set ceiling alone after clamping', () => {
+    const r = resolveTargets({
+      profile: PROFILE,
+      weightKg: WEIGHT,
+      settings: settings({
+        overrides: [
+          { key: 'kcal', value: 1200, setAt: NOW },
+          { key: 'satFat', value: 15, setAt: NOW },
+        ],
+      }),
+      now: NOW,
+    })
+    expect(r.targets.satFat.value).toBe(15)
+    expect(r.targets.satFat.source).toBe('user')
+  })
+
+  it('keeps the set internally coherent after a clamped override', () => {
+    const r = resolveTargets({
+      profile: PROFILE,
+      weightKg: WEIGHT,
+      settings: settings({
+        overrides: [{ key: 'kcal', value: 1000, setAt: NOW }],
+      }),
+      now: NOW,
+    })
+    const { kcal, protein, fat, carbs } = r.targets
+    const implied = protein.value * 4 + fat.value * 9 + carbs.value * 4
+    expect(implied).toBeCloseTo(kcal.value, 4)
+  })
+
   it('reports clamps so the UI can say a floor was reached', () => {
     const r = resolveTargets({
       profile: PROFILE,

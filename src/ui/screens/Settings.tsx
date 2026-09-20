@@ -149,7 +149,9 @@ export function Settings() {
                     <div class="meta">
                       {sourceLabel(t.source)}
                       {CEILING_TARGETS.has(key) && ' · ceiling'}
-                      {t.clampedFrom !== undefined && ' · at a floor'}
+                      {t.clampedFrom !== undefined &&
+                        t.source !== 'clamped' &&
+                        ' · at a floor'}
                     </div>
                   </div>
                   <strong style="font-variant-numeric:tabular-nums">
