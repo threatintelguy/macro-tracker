@@ -9,10 +9,15 @@
       Strict CSP: 'self' plus exactly the barcode lookup hosts. An accidental
       third-party request fails loudly in development rather than silently in
       production. No CDN fonts, scripts, or styles.
+
+      frame-ancestors is deliberately absent: it is ignored when delivered in
+      a meta element, and GitHub Pages cannot set response headers. Pair this
+      with a header at the edge if the app is ever served from somewhere that
+      can send one.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://world.openfoodfacts.org https://images.openfoodfacts.org; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://world.openfoodfacts.org https://images.openfoodfacts.org; object-src 'none'; base-uri 'self'; form-action 'none'"
     />
     <title>Macro Tracker</title>
     <link rel="icon" href="/icon-192.png" />

@@ -11,3 +11,10 @@ data/usda-subset.meta.json
 public/usda-subset.bin
 public/usda-subset.meta.json
 scripts/.fdc-cache/
+
+# The design document stays local. It names the user and carries their body
+# weight, height and age, none of which belong in a public repo. The code
+# itself holds no personal data -- the profile lives in IndexedDB, entered at
+# onboarding, which is what makes this repo publishable at all.
+Lincoln — Macro Tracker Design Document.md
+*Design Document.md
