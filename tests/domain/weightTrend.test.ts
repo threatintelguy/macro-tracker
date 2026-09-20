@@ -46,9 +46,9 @@ describe('weightTrend', () => {
   })
 
   it('holds flat on a constant series', () => {
-    const points = weightTrend(series(Array(30).fill(92.6)))
+    const points = weightTrend(series(Array(30).fill(85.6)))
     expect(points).toHaveLength(30)
-    for (const p of points) expect(p.trend).toBeCloseTo(92.6, 9)
+    for (const p of points) expect(p.trend).toBeCloseTo(85.6, 9)
   })
 
   it('seeds from the first week rather than the first reading', () => {
@@ -85,7 +85,7 @@ describe('weightTrend', () => {
     // Real signal: -0.5 kg/week. Noise: +/-1 kg of water movement.
     const values = Array.from(
       { length: 56 },
-      (_, i) => 92.6 - (0.5 / 7) * i + (rand() - 0.5) * 2,
+      (_, i) => 85.6 - (0.5 / 7) * i + (rand() - 0.5) * 2,
     )
     const points = weightTrend(series(values))
     const rate = trendChangeKgPerWeek(points, 28)!
@@ -94,7 +94,7 @@ describe('weightTrend', () => {
   })
 
   it('marks gapped days as interpolated and holds the trend across them', () => {
-    const readings = series([92.6, null, null, 92.4, null, 92.2])
+    const readings = series([85.6, null, null, 85.4, null, 85.2])
     const points = weightTrend(readings)
     expect(points).toHaveLength(6)
     expect(points[1]!.interpolated).toBe(true)
@@ -116,9 +116,9 @@ describe('weightTrend', () => {
 
   it('accepts readings in any order', () => {
     const shuffled: WeightReading[] = [
-      { date: '2026-09-03', kg: 92.4 },
-      { date: '2026-09-01', kg: 92.8 },
-      { date: '2026-09-02', kg: 92.6 },
+      { date: '2026-09-03', kg: 85.4 },
+      { date: '2026-09-01', kg: 85.8 },
+      { date: '2026-09-02', kg: 85.6 },
     ]
     const points = weightTrend(shuffled)
     expect(points.map((p) => p.date)).toEqual([
@@ -129,7 +129,7 @@ describe('weightTrend', () => {
   })
 
   it('reads the trend on a given date', () => {
-    const points = weightTrend(series([92.6, 92.5, 92.4, 92.3]))
+    const points = weightTrend(series([85.6, 85.5, 85.4, 85.3]))
     expect(trendOn(points, '2026-09-02')).toBeCloseTo(points[1]!.trend, 9)
     // Before the series starts there is nothing to report.
     expect(trendOn(points, '2026-08-01')).toBeUndefined()
@@ -138,11 +138,11 @@ describe('weightTrend', () => {
 
 describe('trendChangeKgPerWeek', () => {
   it('needs at least two points', () => {
-    expect(trendChangeKgPerWeek(weightTrend(series([92.6])), 21)).toBeUndefined()
+    expect(trendChangeKgPerWeek(weightTrend(series([85.6])), 21)).toBeUndefined()
   })
 
   it('is zero on a flat series', () => {
-    const points = weightTrend(series(Array(30).fill(92.6)))
+    const points = weightTrend(series(Array(30).fill(85.6)))
     expect(trendChangeKgPerWeek(points, 21)).toBeCloseTo(0, 9)
   })
 

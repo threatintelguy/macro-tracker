@@ -151,8 +151,8 @@ describe('rollupDay', () => {
   })
 
   it('carries the weight reading through', () => {
-    const r = rollupDay({ day: day({ weightKg: { value: 92.4 } }), entries: [] })
-    expect(r.weightKg).toBe(92.4)
+    const r = rollupDay({ day: day({ weightKg: { value: 85.4 } }), entries: [] })
+    expect(r.weightKg).toBe(85.4)
   })
 })
 
@@ -227,8 +227,9 @@ describe('protein distribution', () => {
       entry({ at: '20:00', nutrients: makeNutrients({ protein: 150 }) }),
     ]
     const r = rollupDay({ day: day(), entries })
-    const { clearing, total, threshold } = occasionsClearingProtein(r, 92.6)
-    expect(threshold).toBeCloseTo(37.04, 2)
+    const { clearing, total, threshold } = occasionsClearingProtein(r, 85.0)
+    // 0.4 g/kg is the per-occasion sufficiency threshold.
+    expect(threshold).toBeCloseTo(0.4 * 85.0, 6)
     expect(total).toBe(4)
     expect(clearing).toBe(1)
     // The daily total looks fine; the distribution does not.
@@ -243,7 +244,7 @@ describe('protein distribution', () => {
       }),
     )
     const r = rollupDay({ day: day(), entries })
-    expect(occasionsClearingProtein(r, 92.6).clearing).toBe(4)
+    expect(occasionsClearingProtein(r, 85.0).clearing).toBe(4)
   })
 })
 

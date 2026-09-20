@@ -131,7 +131,7 @@ export function Onboarding() {
               <input
                 type="number"
                 inputMode="decimal"
-                placeholder="190.5"
+                placeholder="180.0"
                 value={heightCm}
                 onInput={(e) => setHeightCm((e.target as HTMLInputElement).value)}
               />
@@ -144,7 +144,7 @@ export function Onboarding() {
               type="number"
               inputMode="decimal"
               step="0.1"
-              placeholder="92.6"
+              placeholder="85.0"
               value={weightKg}
               onInput={(e) => setWeightKg((e.target as HTMLInputElement).value)}
             />

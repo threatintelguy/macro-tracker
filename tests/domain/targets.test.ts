@@ -7,6 +7,7 @@ import {
 } from '../../src/domain/engine/targets.ts'
 import { CLAMPS } from '../../src/domain/engine/clamps.ts'
 import {
+  ACTIVITY_MULTIPLIERS,
   DEFAULT_SECONDARY_TARGETS,
   mifflinStJeorBmr,
   formulaTdee,
@@ -15,14 +16,16 @@ import {
 } from '../../src/domain/nutrition/index.ts'
 import type { Settings, TargetSet } from '../../src/domain/types.ts'
 
-// The profile from the design document: 92.6 kg / 190.5 cm / age 43.
+// A generic test profile. Deliberately not anyone's real measurements --
+// the app's profile is data entered at onboarding, never code.
 const PROFILE = {
   sex: 'male' as const,
   birthYear: 1983,
-  heightCm: 190.5,
+  heightCm: 180.0,
   activityLevel: 'moderate' as const,
 }
-const WEIGHT = 92.6
+const WEIGHT = 85.0
+const HEIGHT = 180.0
 // Fixed clock so the age derivation is stable.
 const NOW = new Date('2026-09-20T12:00:00').getTime()
 
@@ -41,21 +44,26 @@ function settings(over: Partial<Settings> = {}): Settings {
 }
 
 describe('Mifflin-St Jeor', () => {
-  it('produces a BMR near 1900 for the documented profile', () => {
+  it('matches the published equation exactly', () => {
     const bmr = mifflinStJeorBmr({
       weightKg: WEIGHT,
-      heightCm: 190.5,
+      heightCm: HEIGHT,
       age: 43,
       sex: 'male',
     })
-    // 926 + 1190.625 - 215 + 5 = 1906.625
-    expect(bmr).toBeCloseTo(1906.625, 3)
-    expect(bmr).toBeGreaterThan(1850)
-    expect(bmr).toBeLessThan(1950)
+    // Derived rather than hardcoded, so changing the test profile cannot
+    // silently invalidate the assertion.
+    const expected = 10 * WEIGHT + 6.25 * HEIGHT - 5 * 43 + 5
+    expect(bmr).toBeCloseTo(expected, 9)
   })
 
-  it('lands maintenance inside the documented 2900–3250 band', () => {
-    // The document quotes a realistic maintenance band for this profile.
+  it('scales maintenance by the activity multiplier and nothing else', () => {
+    const bmr = mifflinStJeorBmr({
+      weightKg: WEIGHT,
+      heightCm: HEIGHT,
+      age: 43,
+      sex: 'male',
+    })
     const moderate = formulaTdee({ ...PROFILE, weightKg: WEIGHT, age: 43 })
     const active = formulaTdee({
       ...PROFILE,
@@ -63,8 +71,9 @@ describe('Mifflin-St Jeor', () => {
       age: 43,
       activityLevel: 'active',
     })
-    expect(moderate).toBeGreaterThan(2900)
-    expect(active).toBeLessThan(3300)
+    expect(moderate).toBeCloseTo(bmr * ACTIVITY_MULTIPLIERS.moderate, 6)
+    expect(active).toBeCloseTo(bmr * ACTIVITY_MULTIPLIERS.active, 6)
+    expect(active).toBeGreaterThan(moderate)
   })
 
   it('applies the female offset', () => {
@@ -196,12 +205,11 @@ describe('resolveTargets', () => {
       goalDirection: 'loss',
       now: NOW,
     })
-    // 150–205 g, up to 220 g cutting.
-    expect(targets.protein.value).toBeGreaterThanOrEqual(150)
-    expect(targets.protein.value).toBeLessThanOrEqual(225)
-    // 75–110 g, never below 46 g.
+    // The framework bands, expressed in g/kg so they hold at any body weight.
+    expect(targets.protein.value).toBeGreaterThanOrEqual(1.6 * WEIGHT)
+    expect(targets.protein.value).toBeLessThanOrEqual(2.4 * WEIGHT)
     expect(targets.fat.value).toBeGreaterThanOrEqual(CLAMPS.minFatGPerKg * WEIGHT)
-    expect(targets.fat.value).toBeLessThanOrEqual(115)
+    expect(targets.fat.value).toBeLessThanOrEqual(1.2 * WEIGHT)
   })
 
   it('scales the preset energy delta rather than its absolute figure', () => {
@@ -284,7 +292,11 @@ describe('resolveTargets', () => {
       now: NOW,
     })
     const finalKcal = r.targets.kcal.value
-    expect(finalKcal).toBeGreaterThan(2000)
+    // Held at whichever floor bites: the deficit cap or the absolute minimum.
+    expect(finalKcal).toBeCloseTo(
+      Math.max(r.maintenanceKcal - CLAMPS.maxDeficitKcal, CLAMPS.minKcal),
+      6,
+    )
     expect(r.targets.satFat.value).toBeCloseTo((finalKcal * 0.1) / 9, 4)
     expect(r.targets.addedSugar.value).toBeCloseTo((finalKcal * 0.1) / 4, 4)
     // And the rationale quotes the honoured figure, not the rejected one.

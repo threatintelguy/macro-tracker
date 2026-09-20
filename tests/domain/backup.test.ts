@@ -28,7 +28,7 @@ const DAYS: DayRecord[] = [
     phase: 'calibration',
     precisionMode: 'weighed',
     entries: ['e1'],
-    weightKg: { value: 92.6, time: '07:10' },
+    weightKg: { value: 85.6, time: '07:10' },
     training: [{ kind: 'lifting', minutes: 60 }],
     note: 'Felt strong, and "quoted, comma" text',
   },
@@ -81,7 +81,7 @@ function payload(): BackupPayload {
         direction: 'loss',
         targetRateKgPerWeek: -0.35,
         startDate: '2026-09-01',
-        anchorWeightKg: 92.6,
+        anchorWeightKg: 85.6,
         active: true,
         createdAt: 1,
       },
@@ -189,7 +189,7 @@ describe('plain CSV', () => {
     expect(lines).toHaveLength(3)
     expect(lines[0]).toContain('date,phase,precision_mode')
     expect(lines[1]).toContain('2026-09-19')
-    expect(lines[1]).toContain('92.6')
+    expect(lines[1]).toContain('85.6')
     expect(lines[1]).toContain('303')
   })
 

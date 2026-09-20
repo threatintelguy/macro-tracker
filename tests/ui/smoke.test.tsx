@@ -265,7 +265,7 @@ async function seedProfile(): Promise<void> {
     id: 'profile',
     sex: 'male',
     birthYear: 1983,
-    heightCm: 190.5,
+    heightCm: 180.0,
     activityLevel: 'moderate',
     startDate: start,
     phase: 'calibration',
@@ -276,7 +276,7 @@ async function seedProfile(): Promise<void> {
     theme: 'dark',
   })
   await repo.ensureDay(start, 'calibration', 'weighed')
-  await repo.setWeight(start, 92.6)
+  await repo.setWeight(start, 85.0)
 }
 
 async function seedDayWithFood(): Promise<void> {

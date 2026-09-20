@@ -344,9 +344,9 @@ describe('composite logging', () => {
 describe('weight', () => {
   it('stores a reading against its day and reads it back in order', async () => {
     for (const [date, kg] of [
-      ['2026-09-18', 92.8],
-      ['2026-09-20', 92.4],
-      ['2026-09-19', 92.6],
+      ['2026-09-18', 85.8],
+      ['2026-09-20', 85.4],
+      ['2026-09-19', 85.0],
     ] as const) {
       await ensureDay(date, 'calibration', 'weighed')
       await setWeight(date, kg, '07:10')
@@ -357,7 +357,7 @@ describe('weight', () => {
       '2026-09-19',
       '2026-09-20',
     ])
-    expect(await latestWeightKg()).toBe(92.4)
+    expect(await latestWeightKg()).toBe(85.4)
   })
 
   it('ignores days with no reading', async () => {
@@ -370,9 +370,9 @@ describe('weight', () => {
     await ensureDay('2026-09-20', 'calibration', 'weighed')
     const before = await getRollup('2026-09-20')
     expect(before!.weightKg).toBeUndefined()
-    await setWeight('2026-09-20', 92.4)
+    await setWeight('2026-09-20', 85.4)
     const after = await getRollup('2026-09-20')
-    expect(after!.weightKg).toBe(92.4)
+    expect(after!.weightKg).toBe(85.4)
   })
 })
 
@@ -382,7 +382,7 @@ describe('goals and settings', () => {
       direction: 'loss',
       targetRateKgPerWeek: -0.35,
       startDate: '2026-09-01',
-      anchorWeightKg: 92.6,
+      anchorWeightKg: 85.0,
       active: true,
       createdAt: 1,
     })
@@ -426,7 +426,7 @@ describe('backup bookkeeping', () => {
       id: 'profile',
       sex: 'male',
       birthYear: 1983,
-      heightCm: 190.5,
+      heightCm: 180.0,
       activityLevel: 'moderate',
       startDate: '2026-09-01',
       phase: 'calibration',

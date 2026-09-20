@@ -37,7 +37,7 @@ function targets(over: Partial<Record<keyof TargetSet, number>> = {}): TargetSet
   ) as TargetSet
 }
 
-const WEIGHT = 92.6
+const WEIGHT = 85.0
 
 describe('applyClamps', () => {
   it('leaves a compliant target set alone apart from carb coherence', () => {
@@ -97,8 +97,6 @@ describe('applyClamps', () => {
       weightKg: WEIGHT,
     })
     expect(result.targets.fat.value).toBeCloseTo(CLAMPS.minFatGPerKg * WEIGHT, 6)
-    // 46 g at 92.6 kg, as the design document states.
-    expect(result.targets.fat.value).toBeCloseTo(46.3, 1)
   })
 
   it('raises energy rather than driving carbohydrate negative', () => {
@@ -223,7 +221,8 @@ describe('property: no input produces a target below a clamp', () => {
 
 describe('rate guardrails', () => {
   it('caps loss at 1% of body weight per week', () => {
-    expect(maxLossRateKgPerWeek(92.6)).toBeCloseTo(0.926, 6)
+    expect(maxLossRateKgPerWeek(85)).toBeCloseTo(0.85, 6)
+    expect(maxLossRateKgPerWeek(100)).toBeCloseTo(1.0, 6)
   })
 
   it('caps gain at half a pound per week', () => {
@@ -232,7 +231,7 @@ describe('rate guardrails', () => {
 })
 
 describe('validateGoal', () => {
-  const base = { currentWeightKg: 92.6, heightCm: 190.5 }
+  const base = { currentWeightKg: 85.0, heightCm: 180.0 }
 
   it('accepts a conservative fat-loss goal', () => {
     const v = validateGoal({
@@ -264,7 +263,8 @@ describe('validateGoal', () => {
       ...base,
       direction: 'loss',
       rateKgPerWeek: -0.3,
-      targetWeightKg: 60,
+      // BMI 16.0 at 180 cm, comfortably under the 18.5 limit.
+      targetWeightKg: 52,
     })
     expect(v.ok).toBe(false)
     expect(v.problems.some((p) => p.includes('BMI'))).toBe(true)
