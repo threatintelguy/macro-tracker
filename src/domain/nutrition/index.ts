@@ -176,10 +176,19 @@ export const MACRO_BANDS = {
 } as const
 
 // --- NutrientVector arithmetic -------------------------------------------
+//
+// Unknown is not zero. Every function here carries `null` through rather
+// than coercing it: scaling an unknown gives an unknown, and a sum over a
+// list containing an unknown is itself unknown. The one place that sums
+// known contributions while reporting what is missing is `aggregate`, and it
+// always returns the coverage alongside the value.
 
 export function scaleNutrients(v: NutrientVector, factor: number): NutrientVector {
   const out = { ...ZERO_NUTRIENTS }
-  for (const k of NUTRIENT_KEYS) out[k] = v[k] * factor
+  for (const k of NUTRIENT_KEYS) {
+    const x = v[k]
+    out[k] = x === null ? null : x * factor
+  }
   return out
 }
 
@@ -188,24 +197,35 @@ export function nutrientsForGrams(per100g: NutrientVector, grams: number): Nutri
   return scaleNutrients(per100g, grams / 100)
 }
 
+/** Strict sum: a field unknown in either operand is unknown in the result. */
 export function addNutrients(a: NutrientVector, b: NutrientVector): NutrientVector {
   const out = { ...ZERO_NUTRIENTS }
-  for (const k of NUTRIENT_KEYS) out[k] = a[k] + b[k]
+  for (const k of NUTRIENT_KEYS) {
+    const x = a[k]
+    const y = b[k]
+    out[k] = x === null || y === null ? null : x + y
+  }
   return out
 }
 
+/**
+ * Strict sum over a list. Used where the result becomes a new stored vector
+ * (a recipe's per-100 g, a composite preview): if one ingredient's protein
+ * is unknown, the recipe's protein is unknown, not the sum of the rest.
+ */
 export function sumNutrients(list: readonly NutrientVector[]): NutrientVector {
-  const out = { ...ZERO_NUTRIENTS }
-  for (const v of list) {
-    for (const k of NUTRIENT_KEYS) out[k] += v[k]
-  }
+  let out: NutrientVector = { ...ZERO_NUTRIENTS }
+  for (const v of list) out = addNutrients(out, v)
   return out
 }
 
 export function roundNutrients(v: NutrientVector, dp = 1): NutrientVector {
   const f = 10 ** dp
   const out = { ...ZERO_NUTRIENTS }
-  for (const k of NUTRIENT_KEYS) out[k] = Math.round(v[k] * f) / f
+  for (const k of NUTRIENT_KEYS) {
+    const x = v[k]
+    out[k] = x === null ? null : Math.round(x * f) / f
+  }
   return out
 }
 
@@ -213,16 +233,79 @@ export function makeNutrients(partial: Partial<NutrientVector>): NutrientVector 
   return { ...ZERO_NUTRIENTS, ...partial }
 }
 
+/** The fields of a vector that are unknown. */
+export function missingNutrients(v: NutrientVector): NutrientKey[] {
+  return NUTRIENT_KEYS.filter((k) => v[k] === null)
+}
+
+export function isCompleteVector(v: NutrientVector): boolean {
+  return NUTRIENT_KEYS.every((k) => v[k] !== null)
+}
+
+/**
+ * A rollup of one nutrient over a set of entries: the sum of the known
+ * contributions, plus how many entries contributed. An incomplete aggregate
+ * is a floor, not a total -- "at least 145 g, from 9 of 11 entries".
+ */
+export type Aggregate = {
+  /** Sum of known contributions. */
+  value: number
+  knownEntries: number
+  totalEntries: number
+  /** knownEntries === totalEntries, unless the source is known to be partial. */
+  complete: boolean
+}
+
+export type NutrientTotals = Record<NutrientKey, Aggregate>
+
+export function aggregateOf(values: readonly (number | null)[]): Aggregate {
+  let value = 0
+  let known = 0
+  for (const v of values) {
+    if (v === null) continue
+    value += v
+    known++
+  }
+  return {
+    value,
+    knownEntries: known,
+    totalEntries: values.length,
+    complete: known === values.length,
+  }
+}
+
+export function aggregateNutrients(list: readonly NutrientVector[]): NutrientTotals {
+  const out = {} as NutrientTotals
+  for (const k of NUTRIENT_KEYS) out[k] = aggregateOf(list.map((v) => v[k]))
+  return out
+}
+
+/** A single known figure, as a complete aggregate of one. */
+export function knownAggregate(value: number): Aggregate {
+  return { value, knownEntries: 1, totalEntries: 1, complete: true }
+}
+
+/** Nothing is known about this field for the day. */
+export const UNKNOWN_AGGREGATE: Readonly<Aggregate> = {
+  value: 0,
+  knownEntries: 0,
+  totalEntries: 0,
+  complete: false,
+}
+
 /**
  * Energy implied by a vector's macros. Used to sanity-check imported foods
  * whose stated kcal disagrees with their macros by more than a rounding gap.
+ * Undefined when a macro is unknown: an implied figure from partial macros
+ * would be confidently low.
  */
-export function impliedKcal(v: NutrientVector): number {
+export function impliedKcal(v: NutrientVector): number | undefined {
+  if (v.protein === null || v.fat === null || v.carbs === null) return undefined
   return kcalFromMacros({
     proteinG: v.protein,
     fatG: v.fat,
     carbsG: v.carbs,
-    alcoholG: v.alcohol,
+    alcoholG: v.alcohol ?? 0,
   })
 }
 

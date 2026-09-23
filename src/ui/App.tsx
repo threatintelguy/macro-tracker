@@ -1,8 +1,9 @@
 /**
  * App shell.
  *
- * Three tabs, hash-routed. Resisting a fourth is a design goal, and no
- * router library is needed for three.
+ * Four tabs, hash-routed: Today, Log, Trends, Settings. Trends is the one
+ * the parent design document names as its own screen; resisting a fifth is
+ * the design goal now, and no router library is needed for four.
  */
 
 import { useEffect } from 'preact/hooks'
@@ -10,6 +11,7 @@ import * as store from './store.ts'
 import { Today } from './screens/Today.tsx'
 import { Log } from './screens/Log.tsx'
 import { Settings } from './screens/Settings.tsx'
+import { Trends } from './screens/Trends.tsx'
 import { Onboarding } from './screens/Onboarding.tsx'
 
 export function App() {
@@ -42,6 +44,7 @@ export function App() {
     <>
       {tab === 'today' && <Today />}
       {tab === 'log' && <Log />}
+      {tab === 'trends' && <Trends />}
       {tab === 'settings' && <Settings />}
 
       {store.toast.value && <div class="toast">{store.toast.value}</div>}
@@ -51,6 +54,7 @@ export function App() {
           [
             ['today', 'Today'],
             ['log', 'Log'],
+            ['trends', 'Trends'],
             ['settings', 'Settings'],
           ] as const
         ).map(([id, label]) => (

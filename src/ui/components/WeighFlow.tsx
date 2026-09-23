@@ -15,16 +15,16 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
-import type { Fidelity, FoodItem, NutrientVector } from '../../domain/types.ts'
+import type { Composite, Fidelity, FoodItem, NutrientVector } from '../../domain/types.ts'
 import {
+  aggregateNutrients,
   nutrientsForGrams,
-  sumNutrients,
 } from '../../domain/nutrition/index.ts'
 import { ZERO_NUTRIENTS } from '../../domain/types.ts'
 import * as store from '../store.ts'
 import * as repo from '../../data/repositories.ts'
 import { formatTime } from '../../domain/dates.ts'
-import { Sheet, fmt } from './common.tsx'
+import { AggregateText, Sheet, fmt } from './common.tsx'
 import { BarcodeSheet } from './BarcodeSheet.tsx'
 import { CustomFoodSheet } from './CustomFoodSheet.tsx'
 
@@ -35,16 +35,27 @@ export type DraftComponent = {
   nutrients: NutrientVector
 }
 
-export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) {
+export function WeighFlow(props: {
+  onClose: () => void
+  onSaved?: () => void
+  /**
+   * "Build it from ingredients": most foods that are not in the database are
+   * combinations of foods that are. Grams are estimated rather than weighed,
+   * and the meal is offered as a composite under the name searched for.
+   */
+  estimate?: { name: string }
+}) {
+  const estimating = props.estimate !== undefined
+  const baseFidelity: Fidelity = estimating ? 'estimated' : 'weighed'
   const [query, setQuery] = useState('')
   const [picked, setPicked] = useState<FoodItem | undefined>(undefined)
   const [grams, setGrams] = useState('')
-  const [fidelity, setFidelity] = useState<Fidelity>('weighed')
+  const [fidelity, setFidelity] = useState<Fidelity>(baseFidelity)
   const [draft, setDraft] = useState<DraftComponent[]>([])
   const [showBarcode, setShowBarcode] = useState(false)
   const [showCustom, setShowCustom] = useState(false)
-  const [saveAsComposite, setSaveAsComposite] = useState(false)
-  const [compositeName, setCompositeName] = useState('')
+  const [saveAsComposite, setSaveAsComposite] = useState(estimating)
+  const [compositeName, setCompositeName] = useState(props.estimate?.name ?? '')
 
   const gramsRef = useRef<HTMLInputElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -60,7 +71,7 @@ export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) 
   }, [picked])
 
   const totals = useMemo(
-    () => sumNutrients(draft.map((d) => d.nutrients)),
+    () => aggregateNutrients(draft.map((d) => d.nutrients)),
     [draft],
   )
   const totalGrams = draft.reduce((a, d) => a + d.grams, 0)
@@ -85,7 +96,7 @@ export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) 
     // Stay on the same screen and reset for the next component.
     setPicked(undefined)
     setGrams('')
-    setFidelity('weighed')
+    setFidelity(baseFidelity)
     setQuery('')
     searchRef.current?.focus()
   }
@@ -99,21 +110,12 @@ export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) 
     if (draft.length === 0) return
     const at = formatTime()
     const date = store.selectedDate.value
+    const naming = saveAsComposite && compositeName.trim().length > 0
 
-    await repo.addEntries(
-      draft.map((d) => ({
-        date,
-        at,
-        source: { kind: 'food' as const, foodId: d.food.id, name: d.food.name },
-        grams: d.grams,
-        nutrients: d.nutrients,
-        fidelity: d.fidelity,
-      })),
-    )
-
-    if (saveAsComposite && compositeName.trim().length > 0) {
+    let composite: Composite | undefined
+    if (naming) {
       const now = Date.now()
-      await repo.putComposite({
+      composite = {
         id: repo.newId('c'),
         name: compositeName.trim(),
         version: 1,
@@ -124,7 +126,40 @@ export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) 
         })),
         createdAt: now,
         updatedAt: now,
+      }
+      await repo.putComposite(composite)
+    }
+
+    if (estimating && composite) {
+      // Built from parts: log it as the meal it is, so the day reads
+      // "Restaurant burrito" rather than five loose ingredients.
+      await repo.logCompositeInstance({
+        instance: {
+          kind: 'composite',
+          compositeId: composite.id,
+          version: composite.version,
+          multiplier: 1,
+          overrides: [],
+          name: composite.name,
+        },
+        date,
+        at,
+        fidelity: 'estimated',
       })
+    } else {
+      await repo.addEntries(
+        draft.map((d) => ({
+          date,
+          at,
+          source: { kind: 'food' as const, foodId: d.food.id, name: d.food.name },
+          grams: d.grams,
+          nutrients: d.nutrients,
+          fidelity: d.fidelity,
+        })),
+      )
+    }
+
+    if (naming) {
       await store.refreshComposites()
       store.notify(
         `Saved "${compositeName.trim()}" to your library — one tap next time.`,
@@ -135,14 +170,23 @@ export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) 
       )
     }
 
-    await store.refreshDay()
-    await store.refreshHistory()
+    await store.afterEdit([date])
     props.onSaved?.()
     props.onClose()
   }
 
   return (
-    <Sheet title="Weigh and log" onClose={props.onClose}>
+    <Sheet
+      title={estimating ? 'Build it from ingredients' : 'Weigh and log'}
+      onClose={props.onClose}
+    >
+      {estimating && draft.length === 0 && (
+        <div class="faint">
+          Add each part and estimate its grams — tortilla, rice, beans, chicken,
+          cheese. A full nutrient panel falls out without knowing anything about
+          the whole. Logged as an estimate.
+        </div>
+      )}
       {draft.length > 0 && (
         <div class="running-total">
           <div class="n">
@@ -155,11 +199,11 @@ export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) 
           </div>
           <div class="n">
             <span>kcal</span>
-            <span>{fmt(totals.kcal)}</span>
+            <span><AggregateText agg={totals.kcal} /></span>
           </div>
           <div class="n">
             <span>Protein</span>
-            <span>{fmt(totals.protein)} g</span>
+            <span><AggregateText agg={totals.protein} unit="g" /></span>
           </div>
         </div>
       )}
@@ -223,7 +267,7 @@ export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) 
               placeholder="0"
               onInput={(e) => {
                 setGrams((e.target as HTMLInputElement).value)
-                setFidelity('weighed')
+                setFidelity(baseFidelity)
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') addComponent()
@@ -310,7 +354,7 @@ export function WeighFlow(props: { onClose: () => void; onSaved?: () => void }) 
         </>
       )}
 
-      {draft.length > 1 && (
+      {(draft.length > 1 || (estimating && draft.length > 0)) && (
         <div class="card">
           <label class="toggle">
             <span>Save this meal as a composite</span>

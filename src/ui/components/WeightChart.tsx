@@ -5,113 +5,80 @@
  * design document is explicit that the headline weight is the trend value
  * and today's reading is a dot -- it is easy to regress on, so the raw
  * series is deliberately drawn without a connecting line.
+ *
+ * Noted days carry a marker; tapping it shows the note under the chart.
  */
 
-import { useEffect, useRef } from 'preact/hooks'
-import uPlot from 'uplot'
-import 'uplot/dist/uPlot.min.css'
+import { useEffect, useMemo, useState } from 'preact/hooks'
 import type { TrendPoint } from '../../domain/engine/weightTrend.ts'
-import { fromLocalDate } from '../../domain/dates.ts'
+import type { LocalDate } from '../../domain/types.ts'
+import { formatDisplayDate } from '../../domain/dates.ts'
+import * as repo from '../../data/repositories.ts'
+import * as store from '../store.ts'
+import { TimeChart, type Marker, type SeriesSpec } from './TimeChart.tsx'
 
 export type Horizon = 30 | 90 | 365 | 0
+
+/** Every day note, keyed by date, reloaded whenever history changes. */
+export function useNotes(): Map<LocalDate, string> {
+  const [notes, setNotes] = useState<Map<LocalDate, string>>(new Map())
+  useEffect(() => {
+    let live = true
+    void repo.searchNotes('').then((list) => {
+      if (live) setNotes(new Map(list.map((n) => [n.date, n.note])))
+    })
+    return () => {
+      live = false
+    }
+  }, [store.recentRollups.value])
+  return notes
+}
 
 export function WeightChart(props: {
   points: TrendPoint[]
   horizonDays: Horizon
   height?: number
 }) {
-  const hostRef = useRef<HTMLDivElement>(null)
-  const plotRef = useRef<uPlot | null>(null)
+  const notes = useNotes()
+  const [picked, setPicked] = useState<Marker | undefined>(undefined)
 
-  useEffect(() => {
-    const host = hostRef.current
-    if (!host) return
-
-    const points =
-      props.horizonDays === 0
-        ? props.points
-        : props.points.slice(-props.horizonDays)
-
-    if (points.length < 2) {
-      plotRef.current?.destroy()
-      plotRef.current = null
-      host.innerHTML = ''
-      return
-    }
-
-    const xs = points.map((p) => fromLocalDate(p.date).getTime() / 1000)
-    const trend = points.map((p) => p.trend)
-    const raw = points.map((p) => p.raw ?? null)
-
-    const css = getComputedStyle(document.documentElement)
-    const accent = css.getPropertyValue('--accent').trim() || '#7aa2f7'
-    const faint = css.getPropertyValue('--text-faint').trim() || '#6b7688'
-    const line = css.getPropertyValue('--line').trim() || '#2c3341'
-    const dim = css.getPropertyValue('--text-dim').trim() || '#9aa5b5'
-
-    const opts: uPlot.Options = {
-      width: host.clientWidth || 320,
-      height: props.height ?? 190,
-      padding: [8, 6, 0, 0],
-      legend: { show: true, live: true },
-      cursor: { drag: { x: true, y: false }, points: { size: 6 } },
-      scales: { x: { time: true } },
-      axes: [
-        {
-          stroke: dim,
-          grid: { stroke: line, width: 1 },
-          ticks: { stroke: line },
-          font: '11px system-ui',
-        },
-        {
-          stroke: dim,
-          grid: { stroke: line, width: 1 },
-          ticks: { stroke: line },
-          font: '11px system-ui',
-          size: 44,
-        },
-      ],
-      series: [
-        { label: 'Date' },
-        {
-          label: 'Trend',
-          stroke: accent,
-          width: 2,
-          points: { show: false },
-          value: (_u, v) => (v == null ? '—' : `${v.toFixed(2)} kg`),
-        },
-        {
-          label: 'Reading',
-          // Dots only: the raw series is never the headline.
-          stroke: faint,
-          width: 0,
-          points: { show: true, size: 4, stroke: faint, fill: faint },
-          value: (_u, v) => (v == null ? '—' : `${v.toFixed(1)} kg`),
-        },
-      ],
-    }
-
-    plotRef.current?.destroy()
-    host.innerHTML = ''
-    plotRef.current = new uPlot(opts, [xs, trend, raw], host)
-
-    const onResize = (): void => {
-      if (plotRef.current && host.clientWidth > 0) {
-        plotRef.current.setSize({
-          width: host.clientWidth,
-          height: props.height ?? 190,
-        })
-      }
-    }
-    const observer = new ResizeObserver(onResize)
-    observer.observe(host)
-
-    return () => {
-      observer.disconnect()
-      plotRef.current?.destroy()
-      plotRef.current = null
-    }
-  }, [props.points, props.horizonDays, props.height])
+  const points = useMemo(
+    () => (props.horizonDays === 0 ? props.points : props.points.slice(-props.horizonDays)),
+    [props.points, props.horizonDays],
+  )
+  const dates = useMemo(() => points.map((p) => p.date), [points])
+  const series = useMemo<SeriesSpec[]>(
+    () => [
+      {
+        label: 'Trend',
+        values: points.map((p) => p.trend),
+        color: '--accent',
+        kind: 'line',
+        scale: 'left',
+        unit: 'kg',
+        dp: 2,
+      },
+      {
+        // Dots only: the raw series is never the headline.
+        label: 'Reading',
+        values: points.map((p) => p.raw ?? null),
+        color: '--text-faint',
+        kind: 'dots',
+        scale: 'left',
+        unit: 'kg',
+        dp: 1,
+      },
+    ],
+    [points],
+  )
+  const markers = useMemo<Marker[]>(() => {
+    const first = dates[0]
+    const last = dates[dates.length - 1]
+    if (!first || !last) return []
+    return [...notes.keys()]
+      .filter((d) => d >= first && d <= last)
+      .map((date) => ({ date, kind: 'note' as const }))
+  }, [notes, dates])
 
   if (props.points.length < 2) {
     return (
@@ -122,7 +89,28 @@ export function WeightChart(props: {
     )
   }
 
-  return <div class="chart-wrap" ref={hostRef} />
+  return (
+    <>
+      <TimeChart
+        dates={dates}
+        series={series}
+        markers={markers}
+        onMarker={setPicked}
+        height={props.height ?? 190}
+      />
+      {picked && notes.get(picked.date) && (
+        <div class="picked-note" role="status">
+          <div class="row-between">
+            <strong>{formatDisplayDate(picked.date)}</strong>
+            <button class="btn btn-small btn-ghost" onClick={() => setPicked(undefined)}>
+              Close
+            </button>
+          </div>
+          <p class="note-text">{notes.get(picked.date)}</p>
+        </div>
+      )}
+    </>
+  )
 }
 
 /** Compact sparkline of the trend value, for the home screen. */

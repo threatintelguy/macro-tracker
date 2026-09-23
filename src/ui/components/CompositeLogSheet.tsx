@@ -19,23 +19,36 @@ import type {
   Override,
 } from '../../domain/types.ts'
 import {
+  componentsAtVersion,
   resolveCompositeInstance,
   type Lookups,
 } from '../../domain/composites/index.ts'
 import * as repo from '../../data/repositories.ts'
 import * as store from '../store.ts'
 import { formatTime } from '../../domain/dates.ts'
-import { Sheet, fmt } from './common.tsx'
+import { AggregateText, Sheet, fmt } from './common.tsx'
 
 const MULTIPLIERS = [0.5, 1, 1.5, 2] as const
 
 export function CompositeLogSheet(props: {
   composite: Composite
   onClose: () => void
+  /**
+   * Editing an already-logged instance: start from its multiplier and
+   * overrides, at the version it was logged against. A multiplier-only
+   * change rescales the snapshot; an override change re-resolves it.
+   */
+  editing?: { rootId: string; instance: CompositeInstance }
 }) {
-  const [multiplier, setMultiplier] = useState(1)
-  const [customMultiplier, setCustomMultiplier] = useState('')
-  const [overrides, setOverrides] = useState<Override[]>([])
+  const editing = props.editing
+  const startMultiplier = editing?.instance.multiplier ?? 1
+  const [multiplier, setMultiplier] = useState(startMultiplier)
+  const [customMultiplier, setCustomMultiplier] = useState(
+    MULTIPLIERS.includes(startMultiplier as (typeof MULTIPLIERS)[number])
+      ? ''
+      : String(startMultiplier),
+  )
+  const [overrides, setOverrides] = useState<Override[]>(editing?.instance.overrides ?? [])
   const [swapFor, setSwapFor] = useState<number | undefined>(undefined)
   const [regramFor, setRegramFor] = useState<number | undefined>(undefined)
   const [regramValue, setRegramValue] = useState('')
@@ -47,16 +60,20 @@ export function CompositeLogSheet(props: {
     return {
       food: (id) => index.get(id),
       composite: (id) => compMap.get(id),
+      tombstone: (id) => store.tombstoneById.value.get(id),
     }
-  }, [store.foodIndexVersion.value, store.composites.value])
+  }, [store.foodIndexVersion.value, store.composites.value, store.tombstones.value])
+
+  const version = editing?.instance.version ?? props.composite.version
+  const components = componentsAtVersion(props.composite, version) ?? props.composite.components
 
   const instance: CompositeInstance = {
     kind: 'composite',
     compositeId: props.composite.id,
-    version: props.composite.version,
+    version,
     multiplier,
     overrides,
-    name: props.composite.name,
+    name: editing?.instance.name ?? props.composite.name,
   }
 
   const resolved = useMemo(
@@ -84,7 +101,32 @@ export function CompositeLogSheet(props: {
     return overrides.find((o) => o.componentIndex === index)
   }
 
+  async function saveEdit(): Promise<void> {
+    if (!editing) return
+    const overridesChanged =
+      JSON.stringify(overrides) !== JSON.stringify(editing.instance.overrides)
+    let dates: string[] = []
+    if (overridesChanged) {
+      // What was eaten changed: re-resolve at the pinned version.
+      const first =
+        multiplier !== editing.instance.multiplier
+          ? await repo.editCompositeMultiplier(editing.rootId, multiplier)
+          : []
+      const r = await repo.editCompositeOverrides(editing.rootId, overrides)
+      if (r.dates.length === 0 && r.problems.length > 0) {
+        store.notify(r.problems[0]!)
+        return
+      }
+      dates = [...first, ...r.dates]
+    } else if (multiplier !== editing.instance.multiplier) {
+      dates = await repo.editCompositeMultiplier(editing.rootId, multiplier)
+    }
+    await store.afterEdit(dates)
+    props.onClose()
+  }
+
   async function log(): Promise<void> {
+    if (editing) return saveEdit()
     const { problems } = await repo.logCompositeInstance({
       instance,
       date: store.selectedDate.value,
@@ -95,9 +137,8 @@ export function CompositeLogSheet(props: {
     } else {
       store.notify(`${props.composite.name} logged.`)
     }
-    await store.refreshDay()
-    await store.refreshHistory()
     await store.refreshComposites()
+    await store.afterEdit([store.selectedDate.value])
     props.onClose()
   }
 
@@ -110,15 +151,15 @@ export function CompositeLogSheet(props: {
         </div>
         <div class="n">
           <span>kcal</span>
-          <span>{fmt(resolved.totals.kcal)}</span>
+          <span><AggregateText agg={resolved.totals.kcal} /></span>
         </div>
         <div class="n">
           <span>Protein</span>
-          <span>{fmt(resolved.totals.protein, 1)} g</span>
+          <span><AggregateText agg={resolved.totals.protein} dp={1} unit="g" /></span>
         </div>
         <div class="n">
           <span>Carbs</span>
-          <span>{fmt(resolved.totals.carbs, 1)} g</span>
+          <span><AggregateText agg={resolved.totals.carbs} dp={1} unit="g" /></span>
         </div>
       </div>
 
@@ -162,7 +203,7 @@ export function CompositeLogSheet(props: {
       <div>
         <div class="card-title">Components</div>
         <div class="list">
-          {props.composite.components.map((component, i) => {
+          {components.map((component, i) => {
             const o = overrideFor(i)
             const label =
               component.kind === 'food'
@@ -310,7 +351,7 @@ export function CompositeLogSheet(props: {
         </div>
         {overrides.length > 0 && (
           <div class="faint" style="margin-top:8px">
-            These changes apply to today's entry only. No second composite is
+            These changes apply to this entry only. No second composite is
             created.
           </div>
         )}
@@ -325,7 +366,7 @@ export function CompositeLogSheet(props: {
       )}
 
       <button class="btn btn-primary btn-wide" onClick={() => void log()}>
-        Log {props.composite.name}
+        {editing ? 'Save changes' : `Log ${props.composite.name}`}
       </button>
     </Sheet>
   )

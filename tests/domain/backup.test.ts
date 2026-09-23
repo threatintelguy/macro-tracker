@@ -92,6 +92,9 @@ function payload(): BackupPayload {
     composites: [],
     compositeUsage: [{ compositeId: 'c_salad', loggedAt: 1_758_000_000_000 }],
     backups: [],
+    tombstones: [],
+    adjustments: [],
+    tdeeEstimates: [],
   }
 }
 
@@ -173,7 +176,7 @@ describe('unencrypted export', () => {
 describe('migration', () => {
   it('brings an older payload forward', () => {
     const old = { ...payload(), schemaVersion: 0 }
-    expect(migratePayload(old).schemaVersion).toBe(1)
+    expect(migratePayload(old).schemaVersion).toBe(SCHEMA_VERSION)
   })
 
   it('leaves a current payload alone', () => {

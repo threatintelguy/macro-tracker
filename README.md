@@ -22,15 +22,26 @@ usable weighed tracker with the full composite system.
 | Weight entry and trend | EWMA α = 0.10, seeded from the first week's mean |
 | Targets with provenance | Every number carries `{ value, source, rationale }` |
 | Guardrail clamps | Applied last, no override path, property-tested |
-| Backup and export | Encrypted `.mtb`, plain CSV, unencrypted JSON, forward migrations |
-| Three-tab UI | Today, Log, Settings |
+| Backup, export and import | Encrypted `.mtb`, plain JSON and CSV out; all three back in, with a dry-run preview, explicit merge mode and an undo snapshot |
+| Four-tab UI | Today, Log, Trends, Settings |
 
-Deliberately **not** here, per the phase-1 scope:
+### Addendum 1
 
-- Observed TDEE and the three-week adjustment engine (phase 2)
-- The phase state machine's dual gate and the precision-mode switcher (phase 2)
-- The six analytics views and the weekly narrative (phase 3)
-- Free-text estimated entry and the minimal-mode screen (phase 4)
+| Change | Notes |
+| --- | --- |
+| Foods not in the database | Four routes in order: build from ingredients, clone a near match, enter only what you know, log a stand-in. Unknown nutrients are `null`, never 0; totals report floors with coverage |
+| Needs-detail list | Unknowns and stand-ins, fixable later; no badge, no notification, no warning colour |
+| Import | `.mtb` and `.json` restore everything; CSV imports rows only and says so first |
+| Editing and past days | Edit beside Delete; amount rescales the snapshot, food re-resolves; arrows, swipe and a picker move the diary by day |
+| Composite delete | Tombstones keep past days rendering; delete-and-purge is separate, typed-confirmed and snapshotted |
+| Daily notes | On every day; marked on the charts; searchable from Trends |
+| Phase 2 engine | Observed TDEE (21-day window), the three-week adjustment rule with suppressors and an append-only audit log, the calibration gate, and the precision-mode switcher with a minimal-mode layout |
+
+Still **not** here:
+
+- The rest of the six analytics views (the protein heatmap, weekly comparison) and the weekly narrative (phase 3)
+- Free-text estimated entry (phase 4)
+- Automatic calibration extensions and the recalibration proposals; the gate is reported and the user moves phase
 - The on-device LLM (section 9, deferred) and the native wrapper (phase 6)
 
 The data model, the `Fidelity` field, the `phase`/`precisionMode` fields on
@@ -81,14 +92,14 @@ src/
 ├── ui/              components, three tabs
 ├── domain/
 │   ├── nutrition/   BMR, activity multipliers, macro maths, reference values
-│   ├── engine/      target resolution, clamps, weight trend
+│   ├── engine/      target resolution, clamps, weight trend, observed TDEE, adjustment rule
 │   ├── composites/  resolution, nesting, overrides, versioning, ranking
 │   ├── phase/       calibration progress
 │   └── analytics/   rollups, occasions, rolling averages
 ├── data/            Dexie schema, migrations, repositories
 ├── food/            tier resolution, registry, search index, barcode
 ├── platform/        Capabilities interface — the wrapper door
-└── export/          encryption, CSV, backup
+└── export/          encryption, CSV, backup, import validation and merge planning
 ```
 
 `domain/nutrition/` is person-agnostic: formulas and reference values only. The
@@ -98,7 +109,7 @@ public and contains no personal data.
 
 ## Testing
 
-227 tests. The calculation engine and the clamps carry near-total coverage; the
+312 tests. The calculation engine and the clamps carry near-total coverage; the
 UI gets smoke tests only, because the risk in this app is wrong numbers, not
 broken buttons.
 
@@ -110,8 +121,15 @@ broken buttons.
 - **Weight trend** — synthetic series of known ground truth: flat, a known
   linear slope, and a noisy series whose signal is buried in water movement.
 - **Composites** — cycles, the depth cap, version pinning, overrides, nesting.
-- **Backup** — round trips, a wrong passphrase failing rather than returning
-  garbage, and a header readable without the key.
+- **Backup and import** — export, wipe, import and compare for `.mtb` and
+  `.json`; a version 1 file still importing; a wrong passphrase told apart
+  from a damaged file; malformed files rejected whole; merge modes, repairs
+  and CSV formula defusing.
+- **Unknown is not zero** — a property sweep asserting no day ever reports a
+  total below the sum of its known entries, and floors reported with coverage.
+- **Engine** — observed TDEE against synthetic series of known ground truth,
+  the adjustment rule and its suppressors, and edits that append notes to
+  past decisions rather than rewriting them.
 - **Lint rule** — no banned word (*streak*, *cheat*, *burn off*, *earn back*) in
   any user-facing string, and exactly one outbound host in the whole source.
 

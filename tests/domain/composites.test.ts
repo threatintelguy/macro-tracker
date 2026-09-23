@@ -85,8 +85,8 @@ describe('resolution', () => {
     expect(r.totalGrams).toBe(275)
     // 100g spinach + 150g salmon + 10g oil + 15g seeds
     const expectedKcal = 23 + 206 * 1.5 + 884 * 0.1 + 559 * 0.15
-    expect(r.totals.kcal).toBeCloseTo(expectedKcal, 4)
-    expect(r.totals.protein).toBeCloseTo(2.9 + 22.1 * 1.5 + 30.2 * 0.15, 4)
+    expect(r.totals.kcal.value).toBeCloseTo(expectedKcal, 4)
+    expect(r.totals.protein.value).toBeCloseTo(2.9 + 22.1 * 1.5 + 30.2 * 0.15, 4)
   })
 
   it('scales by the multiplier without touching the definition', () => {
@@ -94,7 +94,7 @@ describe('resolution', () => {
     const half = resolveCompositeInstance(instance({ multiplier: 0.5 }), lookups())
     const double = resolveCompositeInstance(instance({ multiplier: 2 }), lookups())
 
-    expect(half.totals.kcal).toBeCloseTo(single.totals.kcal / 2, 6)
+    expect(half.totals.kcal.value).toBeCloseTo(single.totals.kcal.value / 2, 6)
     expect(double.totalGrams).toBeCloseTo(single.totalGrams * 2, 6)
     // The stored definition is unchanged.
     expect(SALAD.components[1]).toMatchObject({ grams: 150 })
@@ -282,7 +282,8 @@ describe('guards', () => {
     expect(r.problems.some((p) => p.kind === 'missing-food')).toBe(true)
     // The row survives at zero nutrients so the meal is still visible.
     expect(r.rows).toHaveLength(1)
-    expect(r.rows[0]!.nutrients.kcal).toBe(0)
+    // Unknown, not zero: a missing food contributes nothing known.
+    expect(r.rows[0]!.nutrients.kcal).toBeNull()
   })
 
   it('reports a missing composite rather than resolving to nothing silently', () => {

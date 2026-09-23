@@ -1,6 +1,7 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef } from 'preact/hooks'
 import type { TargetKey, TargetValue } from '../../domain/types.ts'
+import type { Aggregate } from '../../domain/nutrition/index.ts'
 import {
   CEILING_TARGETS,
   TARGET_LABELS,
@@ -56,7 +57,7 @@ export function Sheet(props: {
   )
 }
 
-export type BandState = 'in' | 'near' | 'beyond'
+export type BandState = 'in' | 'near' | 'beyond' | 'unknown'
 
 /**
  * Distance from a band, never pass/fail.
@@ -81,26 +82,42 @@ export function bandState(
   return 'beyond'
 }
 
+/**
+ * A band against a target.
+ *
+ * `incomplete` is for a total with unknown contributions. Below target it
+ * renders as a partial fill in a neutral pattern, never as a shortfall: the
+ * user has not missed the target, the app does not know yet, and the UI
+ * must not conflate the two. A floor that already clears the target (or a
+ * ceiling) is simply shown as what is known.
+ */
 export function Band(props: {
   value: number
   target: number
   isCeiling?: boolean
+  incomplete?: boolean
 }) {
-  const { value, target, isCeiling = false } = props
-  const state = bandState(value, target, isCeiling)
+  const { value, target, isCeiling = false, incomplete = false } = props
+  const known = bandState(value, target, isCeiling)
+  const state: BandState =
+    incomplete && !isCeiling && value < target * 0.9 ? 'unknown' : known
   // The bar is scaled so the target marker sits at 75% of the width, which
   // leaves room to show a figure above target without the bar pinning.
   const pct = target > 0 ? Math.min(100, (value / target) * 75) : 0
   return (
-    <div class="band" role="img" aria-label={`${Math.round(value)} of ${Math.round(target)}`}>
+    <div
+      class="band"
+      role="img"
+      aria-label={`${incomplete ? 'at least ' : ''}${Math.round(value)} of ${Math.round(target)}`}
+    >
       <div class="band-fill" data-state={state} style={`width:${pct}%`} />
       <div class="band-marker" style="left:75%" />
     </div>
   )
 }
 
-export function fmt(n: number | undefined, dp = 0): string {
-  if (n === undefined || !Number.isFinite(n)) return '—'
+export function fmt(n: number | null | undefined, dp = 0): string {
+  if (n === undefined || n === null || !Number.isFinite(n)) return '—'
   return n.toLocaleString(undefined, {
     minimumFractionDigits: dp,
     maximumFractionDigits: dp,
@@ -206,4 +223,41 @@ export function Meter(props: { pct: number; label?: string }) {
 
 export function Empty(props: { children: ComponentChildren }) {
   return <div class="empty">{props.children}</div>
+}
+
+/**
+ * A total with its coverage. Complete: the number. Incomplete: "at least"
+ * the number, with "9 of 11 entries" beside it -- a more useful statement
+ * than a confident wrong number.
+ */
+export function AggregateText(props: { agg: Aggregate; unit?: string; dp?: number }) {
+  const { agg, unit = '', dp = 0 } = props
+  if (agg.complete) {
+    return (
+      <>
+        {fmt(agg.value, dp)}
+        {unit && ` ${unit}`}
+      </>
+    )
+  }
+  if (agg.knownEntries === 0) return <span class="unknown-value">not known yet</span>
+  return (
+    <span class="floor-value">
+      at least {fmt(agg.value, dp)}
+      {unit && ` ${unit}`}
+      <span class="coverage">
+        {' '}
+        · {agg.knownEntries} of {agg.totalEntries} entries
+      </span>
+    </span>
+  )
+}
+
+/** A number input whose blank means unknown, not zero. */
+export function parseOptionalNumber(raw: string | undefined): number | null {
+  if (raw === undefined) return null
+  const t = raw.trim()
+  if (t === '') return null
+  const n = Number(t)
+  return Number.isFinite(n) && n >= 0 ? n : null
 }

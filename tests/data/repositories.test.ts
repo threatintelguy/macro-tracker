@@ -142,11 +142,11 @@ describe('days and entries', () => {
       fidelity: 'weighed',
     })
     const before = await getRollup('2026-09-20')
-    expect(before!.totals.kcal).toBe(300)
+    expect(before!.totals.kcal.value).toBe(300)
 
     await updateEntry(entry.id, { grams: 160, nutrients: makeNutrients({ kcal: 600 }) })
     const after = await getRollup('2026-09-20')
-    expect(after!.totals.kcal).toBe(600)
+    expect(after!.totals.kcal.value).toBe(600)
   })
 
   it('fills a date range with empty days for backfill', async () => {
@@ -185,7 +185,7 @@ describe('rollups', () => {
     })
     const third = await getRollup('2026-09-20')
     expect(third).not.toBe(first)
-    expect(third!.totals.kcal).toBe(443)
+    expect(third!.totals.kcal.value).toBe(443)
   })
 
   it('rolls up a range in one pass', async () => {
@@ -232,7 +232,7 @@ describe('composite logging', () => {
     const rollup = await getRollup('2026-09-20')
     // 100 g spinach + 150 g salmon + 10 g oil, from the curated table.
     const expected = 23 + 206 * 1.5 + 884 * 0.1
-    expect(rollup!.totals.kcal).toBeCloseTo(expected, 4)
+    expect(rollup!.totals.kcal.value).toBeCloseTo(expected, 4)
     expect(rollup!.occasions).toHaveLength(1)
   })
 
@@ -294,7 +294,7 @@ describe('composite logging', () => {
       expect(e.nutrients.kcal, e.source.name).toBeGreaterThan(0)
     }
     const rollup = await getRollup('2026-09-20')
-    expect(rollup!.totals.kcal).toBeCloseTo(23 + 206 * 1.5 + 884 * 0.1, 4)
+    expect(rollup!.totals.kcal.value).toBeCloseTo(23 + 206 * 1.5 + 884 * 0.1, 4)
   })
 
   it('refuses the meal rather than writing rows at zero nutrients', async () => {

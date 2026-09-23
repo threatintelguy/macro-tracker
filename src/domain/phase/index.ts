@@ -143,3 +143,47 @@ export const PRECISION_MODE_INFO = {
       'Keeps the protein and weight series continuous. Cannot feed measured expenditure, which needs full intake.',
   },
 } as const
+
+export const GATE_MIN_LOGGED_PCT = 70
+export const GATE_MIN_WEIGHT_ENTRIES = 8
+export const GATE_MAX_TDEE_SE = 150
+
+export type GateCheck = {
+  dateReached: boolean
+  loggedPct: number
+  weightEntries: number
+  tdeeSe?: number
+  dataSufficient: boolean
+  passes: boolean
+}
+
+/**
+ * The dual gate out of calibration or recalibration: the scheduled end date
+ * must pass AND the data must suffice -- at least 70% of days logged at
+ * full fidelity, at least 8 weight readings, and a measured-expenditure
+ * standard error under ±150 kcal. The user confirms the transition; the app
+ * only reports whether the gate is open.
+ */
+export function graduationGate(input: {
+  progress: CalibrationProgress
+  tdeeSe?: number
+  now?: Date
+}): GateCheck {
+  const t = today(input.now ?? new Date())
+  const p = input.progress
+  const dateReached = t >= p.endDate
+  const loggedPct = p.coveragePct
+  const dataSufficient =
+    loggedPct >= GATE_MIN_LOGGED_PCT &&
+    p.weightEntries >= GATE_MIN_WEIGHT_ENTRIES &&
+    input.tdeeSe !== undefined &&
+    input.tdeeSe < GATE_MAX_TDEE_SE
+  return {
+    dateReached,
+    loggedPct,
+    weightEntries: p.weightEntries,
+    ...(input.tdeeSe !== undefined ? { tdeeSe: input.tdeeSe } : {}),
+    dataSufficient,
+    passes: dateReached && dataSufficient,
+  }
+}

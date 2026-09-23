@@ -12,7 +12,6 @@
  */
 
 import type { FoodItem, NutrientVector, Portion } from '../domain/types.ts'
-import { makeNutrients } from '../domain/nutrition/index.ts'
 
 const OFF_ENDPOINT = 'https://world.openfoodfacts.org/api/v2/product'
 
@@ -169,18 +168,22 @@ export function normaliseOffProduct(
     return undefined
   }
 
-  const per100g: NutrientVector = makeNutrients({
-    kcal: kcal ?? 0,
-    protein: protein ?? 0,
-    carbs: carbs ?? 0,
-    fat: fat ?? 0,
-    satFat: num(n['saturated-fat_100g']) ?? 0,
-    fibre: num(n['fiber_100g']) ?? 0,
+  // Unknown is not zero: a field the product does not report is stored as
+  // null, so it never drags an average down. Alcohol is the one exception --
+  // a product containing alcohol must declare it, so its absence from a
+  // label is a statement that there is none.
+  const per100g: NutrientVector = {
+    kcal: kcal ?? null,
+    protein: protein ?? null,
+    carbs: carbs ?? null,
+    fat: fat ?? null,
+    satFat: num(n['saturated-fat_100g']) ?? null,
+    fibre: num(n['fiber_100g']) ?? null,
     // OFF reports sodium in grams per 100 g; the app stores milligrams.
     sodium: sodiumMg(n),
-    addedSugar: num(n['added-sugars_100g']) ?? 0,
+    addedSugar: num(n['added-sugars_100g']) ?? null,
     alcohol: num(n['alcohol_100g']) ?? 0,
-  })
+  }
 
   const portions: Portion[] = []
   const servingG = num(product.serving_quantity)
@@ -209,13 +212,13 @@ export function normaliseOffProduct(
   }
 }
 
-function sodiumMg(n: OffNutriments): number {
+function sodiumMg(n: OffNutriments): number | null {
   const sodiumG = num(n['sodium_100g'])
   if (sodiumG !== undefined) return sodiumG * 1000
   const saltG = num(n['salt_100g'])
   // Salt to sodium: the conventional 2.5 factor.
   if (saltG !== undefined) return (saltG / 2.5) * 1000
-  return 0
+  return null
 }
 
 function parsePackSize(q: string | undefined): number | undefined {

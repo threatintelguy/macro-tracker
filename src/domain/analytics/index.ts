@@ -4,6 +4,10 @@
  * Every headline figure in the app is a 7-day rolling average. Daily values
  * exist and are inspectable, but they are never the primary display: daily
  * targets invite all-or-nothing thinking and daily variance is mostly noise.
+ *
+ * Every total here is an `Aggregate`: the sum of known contributions plus
+ * its coverage. Unknown is not zero, so an incomplete total is a floor --
+ * "at least 145 g, from 9 of 11 entries" -- never a confident low number.
  */
 
 import type {
@@ -11,13 +15,19 @@ import type {
   Entry,
   Fidelity,
   LocalDate,
-  NutrientVector,
+  NutrientKey,
   OccasionId,
+  Phase,
+  PrecisionMode,
 } from '../types.ts'
-import { NUTRIENT_KEYS, ZERO_NUTRIENTS } from '../types.ts'
+import { NUTRIENT_KEYS } from '../types.ts'
 import {
+  UNKNOWN_AGGREGATE,
+  aggregateNutrients,
+  knownAggregate,
   occasionSufficiencyThreshold,
-  sumNutrients,
+  type Aggregate,
+  type NutrientTotals,
 } from '../nutrition/index.ts'
 import { addDays, minutesOfDay } from '../dates.ts'
 
@@ -27,6 +37,11 @@ import { addDays, minutesOfDay } from '../dates.ts'
  * `logged` days are the only ones that may feed observed-TDEE computation:
  * guessed intake would corrupt the one calculation that depends on intake
  * accuracy. `partial` days still appear in every trend line.
+ *
+ * A day whose calories are incomplete (an entry with unknown kcal) is
+ * `partial` too. That reuses the estimated-day exclusion path rather than
+ * adding a second one; a day with complete calories but missing
+ * micronutrients still feeds TDEE fine.
  */
 export type DayConfidence = 'logged' | 'partial' | 'minimal' | 'empty'
 
@@ -37,13 +52,19 @@ export type Occasion = {
   /** 'HH:MM' of the first entry in the bucket. */
   startsAt: string
   entryIds: string[]
-  nutrients: NutrientVector
+  nutrients: NutrientTotals
+  /** Known protein. A floor when `proteinComplete` is false. */
   proteinG: number
+  proteinComplete: boolean
 }
 
 export type DayRollup = {
   date: LocalDate
-  totals: NutrientVector
+  /** The phase and precision mode the day was logged under. */
+  phase: Phase
+  precisionMode: PrecisionMode
+  /** Each field is a value plus its coverage. Incomplete means a floor. */
+  totals: NutrientTotals
   confidence: DayConfidence
   /** The lowest fidelity present, which is what sets the day's confidence. */
   fidelities: Fidelity[]
@@ -53,7 +74,12 @@ export type DayRollup = {
   /** minimal mode days carry protein only. */
   proteinOverride?: number
   satFatFlag?: 'low' | 'high'
+  /** Set when the day carries a note, so charts can mark it. */
+  hasNote?: boolean
 }
+
+/** Named occasions an entry can be pinned to. Anything else buckets by time. */
+export const NAMED_OCCASIONS = ['breakfast', 'lunch', 'dinner', 'snack'] as const
 
 /**
  * Bucket entries into occasions. Entries within the window group together;
@@ -126,7 +152,7 @@ export function bucketOccasions(
 }
 
 function makeOccasion(id: OccasionId, entries: Entry[]): Occasion {
-  const nutrients = sumNutrients(entries.map((e) => e.nutrients))
+  const nutrients = aggregateNutrients(entries.map((e) => e.nutrients))
   const first = entries.reduce((best, e) => {
     if (!e.at) return best
     if (!best) return e.at
@@ -137,7 +163,8 @@ function makeOccasion(id: OccasionId, entries: Entry[]): Occasion {
     startsAt: first ?? '--:--',
     entryIds: entries.map((e) => e.id),
     nutrients,
-    proteinG: nutrients.protein,
+    proteinG: nutrients.protein.value,
+    proteinComplete: nutrients.protein.complete,
   }
 }
 
@@ -156,37 +183,43 @@ export function rollupDay(input: {
   const { day, entries } = input
   const window = input.occasionWindowMinutes ?? DEFAULT_OCCASION_WINDOW_MINUTES
 
-  const totals = sumNutrients(entries.map((e) => e.nutrients))
-  const fidelities = entries.map((e) => e.fidelity)
+  const common = {
+    date: day.date,
+    phase: day.phase,
+    precisionMode: day.precisionMode,
+    ...(day.weightKg ? { weightKg: day.weightKg.value } : {}),
+    ...(day.satFatFlag ? { satFatFlag: day.satFatFlag } : {}),
+    ...(day.note !== undefined && day.note.trim().length > 0 ? { hasNote: true } : {}),
+  }
 
   // minimal mode: protein entered directly, bypassing entries entirely.
+  // Everything else is unknown for the day -- not zero -- so it neither
+  // drags an average down nor reads as a shortfall.
   if (day.proteinOverride !== undefined && entries.length === 0) {
-    const t = { ...ZERO_NUTRIENTS, protein: day.proteinOverride }
+    const t = {} as NutrientTotals
+    for (const k of NUTRIENT_KEYS) t[k] = { ...UNKNOWN_AGGREGATE }
+    t.protein = knownAggregate(day.proteinOverride)
     return {
-      date: day.date,
+      ...common,
       totals: t,
       confidence: 'minimal',
       fidelities: ['flagged'],
       entryCount: 0,
       occasions: [],
-      ...(day.weightKg ? { weightKg: day.weightKg.value } : {}),
       proteinOverride: day.proteinOverride,
-      ...(day.satFatFlag ? { satFatFlag: day.satFatFlag } : {}),
     }
   }
 
   return {
-    date: day.date,
-    totals,
+    ...common,
+    totals: aggregateNutrients(entries.map((e) => e.nutrients)),
     confidence: dayConfidence(day, entries),
-    fidelities,
+    fidelities: entries.map((e) => e.fidelity),
     entryCount: entries.length,
     occasions: bucketOccasions(entries, window),
-    ...(day.weightKg ? { weightKg: day.weightKg.value } : {}),
     ...(day.proteinOverride !== undefined
       ? { proteinOverride: day.proteinOverride }
       : {}),
-    ...(day.satFatFlag ? { satFatFlag: day.satFatFlag } : {}),
   }
 }
 
@@ -198,7 +231,11 @@ export function dayConfidence(
     return day.proteinOverride !== undefined ? 'minimal' : 'empty'
   }
   const hasEstimate = entries.some(
-    (e) => e.fidelity === 'estimated' || e.fidelity === 'flagged',
+    (e) =>
+      e.fidelity === 'estimated' ||
+      e.fidelity === 'flagged' ||
+      e.proxyFor !== undefined ||
+      e.nutrients.kcal === null,
   )
   if (hasEstimate) return 'partial'
   return 'logged'
@@ -227,7 +264,9 @@ export function rollingMean(
 
 export type NutrientSeries = {
   dates: LocalDate[]
-  values: Record<keyof NutrientVector, (number | undefined)[]>
+  /** Known sums. Where `complete` is false the value is a floor. */
+  values: Record<NutrientKey, (number | undefined)[]>
+  complete: Record<NutrientKey, boolean[]>
   confidence: DayConfidence[]
 }
 
@@ -246,37 +285,52 @@ export function buildSeries(
   }
 
   const values = {} as NutrientSeries['values']
-  for (const k of NUTRIENT_KEYS) values[k] = []
+  const complete = {} as NutrientSeries['complete']
+  for (const k of NUTRIENT_KEYS) {
+    values[k] = []
+    complete[k] = []
+  }
   const confidence: DayConfidence[] = []
 
   for (const d of dates) {
     const r = byDate.get(d)
     confidence.push(r?.confidence ?? 'empty')
     for (const k of NUTRIENT_KEYS) {
-      values[k].push(r && r.confidence !== 'empty' ? r.totals[k] : undefined)
+      const agg = r && r.confidence !== 'empty' ? r.totals[k] : undefined
+      // A field with no known contribution at all is a gap, not a zero.
+      values[k].push(agg && agg.knownEntries > 0 ? agg.value : undefined)
+      complete[k].push(agg?.complete ?? false)
     }
   }
 
-  return { dates, values, confidence }
+  return { dates, values, complete, confidence }
 }
 
 /**
  * The count of occasions clearing the per-occasion protein threshold.
  * A count rather than an average, because an average conceals the common
  * failure of three light meals plus one enormous one.
+ *
+ * A floor that already clears the threshold clears it. An incomplete
+ * occasion below the threshold is unknown rather than short, and is
+ * reported separately so the UI never renders it as a miss.
  */
 export function occasionsClearingProtein(
   rollup: DayRollup,
   bodyWeightKg: number,
-): { clearing: number; total: number; threshold: number } {
+): { clearing: number; total: number; threshold: number; unknown: number } {
   const threshold = occasionSufficiencyThreshold(bodyWeightKg)
   const clearing = rollup.occasions.filter((o) => o.proteinG >= threshold).length
-  return { clearing, total: rollup.occasions.length, threshold }
+  const unknown = rollup.occasions.filter(
+    (o) => !o.proteinComplete && o.proteinG < threshold,
+  ).length
+  return { clearing, total: rollup.occasions.length, threshold, unknown }
 }
 
 /**
  * Logging adherence over a range: the share of days at full `logged`
- * fidelity. This is the figure the 70% adjustment threshold reads.
+ * fidelity. This is the figure the 70% adjustment threshold reads, and it
+ * is computed live -- backfilling a missed day legitimately lifts it.
  */
 export function adherencePct(
   rollups: readonly DayRollup[],
@@ -288,11 +342,53 @@ export function adherencePct(
 }
 
 export function meanIntakeKcal(rollups: readonly DayRollup[]): number | undefined {
+  // `logged` already guarantees complete calories; the check is belt and
+  // braces, because a floor averaged in here would corrupt TDEE.
   const vals = rollups
-    .filter((r) => r.confidence === 'logged')
-    .map((r) => r.totals.kcal)
+    .filter((r) => r.confidence === 'logged' && r.totals.kcal.complete)
+    .map((r) => r.totals.kcal.value)
   if (vals.length === 0) return undefined
   return vals.reduce((a, b) => a + b, 0) / vals.length
+}
+
+export type RollingMean = {
+  value: number
+  /** Days whose figure for this nutrient was complete and counted. */
+  days: number
+  /** Days in the window with something logged but this nutrient incomplete. */
+  incompleteDays: number
+}
+
+/**
+ * Mean of one nutrient over a set of days, counting only days where that
+ * nutrient is complete. A floor averaged in as if it were a total is
+ * exactly the silent low number that unknown-is-not-zero exists to prevent.
+ */
+export function meanOfComplete(
+  rollups: readonly DayRollup[],
+  key: NutrientKey,
+): RollingMean | undefined {
+  const counted = rollups.filter((r) => r.confidence !== 'empty')
+  const complete = counted.filter((r) => r.totals[key].complete)
+  const incompleteDays = counted.length - complete.length
+  if (complete.length === 0) return undefined
+  return {
+    value: complete.reduce((a, r) => a + r.totals[key].value, 0) / complete.length,
+    days: complete.length,
+    incompleteDays,
+  }
+}
+
+/** How an aggregate reads: "145 g", or "at least 145 g, from 9 of 11 entries". */
+export function describeAggregate(agg: Aggregate, unit: string, dp = 0): string {
+  const n = agg.value.toLocaleString(undefined, {
+    minimumFractionDigits: dp,
+    maximumFractionDigits: dp,
+  })
+  const withUnit = unit.length > 0 ? `${n} ${unit}` : n
+  if (agg.complete) return withUnit
+  if (agg.knownEntries === 0) return 'not known yet'
+  return `at least ${withUnit}, from ${agg.knownEntries} of ${agg.totalEntries} entries`
 }
 
 export function confidenceLabel(c: DayConfidence): string {
