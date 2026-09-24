@@ -115,8 +115,8 @@ describe('rollupDay', () => {
       entry({ at: '13:00', nutrients: makeNutrients({ kcal: 700, protein: 45 }) }),
     ]
     const r = rollupDay({ day: day({ entries: entries.map((e) => e.id) }), entries })
-    expect(r.totals.kcal).toBe(1200)
-    expect(r.totals.protein).toBe(85)
+    expect(r.totals.kcal.value).toBe(1200)
+    expect(r.totals.protein.value).toBe(85)
     expect(r.occasions).toHaveLength(2)
     expect(r.confidence).toBe('logged')
   })
@@ -137,8 +137,10 @@ describe('rollupDay', () => {
       entries: [],
     })
     expect(r.confidence).toBe('minimal')
-    expect(r.totals.protein).toBe(165)
-    expect(r.totals.kcal).toBe(0)
+    expect(r.totals.protein.value).toBe(165)
+    // Unknown, not zero: a minimal day records protein only.
+    expect(r.totals.kcal.complete).toBe(false)
+    expect(r.totals.kcal.knownEntries).toBe(0)
     expect(r.satFatFlag).toBe('low')
   })
 
@@ -233,7 +235,7 @@ describe('protein distribution', () => {
     expect(total).toBe(4)
     expect(clearing).toBe(1)
     // The daily total looks fine; the distribution does not.
-    expect(r.totals.protein).toBe(180)
+    expect(r.totals.protein.value).toBe(180)
   })
 
   it('counts an even distribution as four clearing', () => {

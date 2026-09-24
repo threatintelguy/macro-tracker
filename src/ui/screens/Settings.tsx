@@ -2,8 +2,9 @@
  * Settings.
  *
  * Profile · goal and rate · targets with provenance, each editable and
- * resettable · composite library management · custom foods · export and
- * backup · offline mode · theme.
+ * resettable · phase and precision mode · composite library management ·
+ * custom foods · export and import, as a matched pair · the needs-detail
+ * list · offline mode · theme.
  *
  * The goal screen refuses an unsafe rate or target at input rather than
  * accepting it and clamping later, so the app never displays a number it
@@ -41,20 +42,37 @@ import {
   daysSinceBackup,
   daysToCsv,
   entriesToCsv,
-  readBackup,
-  readHeader,
+  jsonFilename,
+  payloadToJson,
   writeBackup,
-  type BackupPayload,
 } from '../../export/backup.ts'
+import { collectPayload, restoreSnapshot } from '../../data/transfer.ts'
+import * as engine from '../../data/engine.ts'
 import { Empty, Sheet, fmt } from '../components/common.tsx'
 import { CompositeEditor } from '../components/CompositeEditor.tsx'
+import { CompositeDeleteSheet } from '../components/CompositeDeleteSheet.tsx'
+import { ImportSheet } from '../components/ImportSheet.tsx'
+import { NeedsDetailSheet } from '../components/NeedsDetailSheet.tsx'
 import { today } from '../../domain/dates.ts'
+import {
+  GATE_MAX_TDEE_SE,
+  GATE_MIN_LOGGED_PCT,
+  GATE_MIN_WEIGHT_ENTRIES,
+  PRECISION_MODE_INFO,
+  graduationGate,
+  phaseLabel,
+  precisionModeLabel,
+} from '../../domain/phase/index.ts'
+import type { PrecisionMode } from '../../domain/types.ts'
 
 export function Settings() {
   const [editTarget, setEditTarget] = useState<TargetKey | undefined>(undefined)
   const [editComposite, setEditComposite] = useState<Composite | undefined>(undefined)
   const [newComposite, setNewComposite] = useState(false)
   const [showBackup, setShowBackup] = useState(false)
+  const [showImport, setShowImport] = useState(false)
+  const [showNeedsDetail, setShowNeedsDetail] = useState(false)
+  const [deleting, setDeleting] = useState<Composite | undefined>(undefined)
   const [showGoal, setShowGoal] = useState(false)
   const [storage, setStorage] = useState<StorageEstimate | undefined>(undefined)
 
@@ -110,6 +128,30 @@ export function Settings() {
           </button>
         </div>
       </div>
+
+      {/* Export and import, as a matched pair. */}
+      <div class="card">
+        <div class="card-title">Your data</div>
+        <div class="grid-2">
+          <button class="btn" onClick={() => setShowBackup(true)}>
+            Export
+          </button>
+          <button class="btn" onClick={() => setShowImport(true)}>
+            Import
+          </button>
+        </div>
+        <Snapshots />
+        <button
+          class="btn btn-small btn-ghost btn-wide"
+          style="margin-top:10px"
+          onClick={() => setShowNeedsDetail(true)}
+        >
+          Needs detail
+          {store.needsDetailCount.value > 0 && ` · ${store.needsDetailCount.value}`}
+        </button>
+      </div>
+
+      <PhaseAndMode />
 
       {/* Targets with provenance. */}
       <div class="card">
@@ -264,7 +306,7 @@ export function Settings() {
             New
           </button>
         </div>
-        <CompositeLibrary onEdit={setEditComposite} />
+        <CompositeLibrary onEdit={setEditComposite} onDelete={setDeleting} />
       </div>
 
       {/* Privacy and network. */}
@@ -380,6 +422,11 @@ export function Settings() {
       )}
       {showGoal && <GoalSheet onClose={() => setShowGoal(false)} />}
       {showBackup && <BackupSheet onClose={() => setShowBackup(false)} />}
+      {showImport && <ImportSheet onClose={() => setShowImport(false)} />}
+      {showNeedsDetail && <NeedsDetailSheet onClose={() => setShowNeedsDetail(false)} />}
+      {deleting && (
+        <CompositeDeleteSheet composite={deleting} onClose={() => setDeleting(undefined)} />
+      )}
       {(editComposite || newComposite) && (
         <CompositeEditor
           {...(editComposite ? { composite: editComposite } : {})}
@@ -393,23 +440,51 @@ export function Settings() {
   )
 }
 
-function CompositeLibrary(props: { onEdit: (c: Composite) => void }) {
+type LibrarySort = 'mostUsed' | 'leastUsed' | 'recent' | 'longAgo'
+
+const SORT_LABELS: Record<LibrarySort, string> = {
+  mostUsed: 'Most used',
+  leastUsed: 'Least used',
+  recent: 'Used recently',
+  longAgo: 'Not used lately',
+}
+
+/**
+ * Composites auto-save from every multi-component meal, so the library
+ * accumulates one-offs. Usage count and last-used date, sortable both ways,
+ * make cleanup obvious without the app prompting anything. A meal used once,
+ * months ago, is the candidate; nothing is ever acted on automatically.
+ */
+function CompositeLibrary(props: {
+  onEdit: (c: Composite) => void
+  onDelete: (c: Composite) => void
+}) {
   const composites = store.composites.value
   const usage = store.usage.value
+  const [sort, setSort] = useState<LibrarySort>('mostUsed')
 
   const rows = useMemo(() => {
-    return composites
-      .map((c) => {
-        const uses = usage.filter((u) => u.compositeId === c.id)
-        return {
-          composite: c,
-          count: uses.length,
-          lastUsedAt:
-            uses.length > 0 ? Math.max(...uses.map((u) => u.loggedAt)) : undefined,
-        }
-      })
-      .sort((a, b) => b.count - a.count)
-  }, [composites, usage])
+    const list = composites.map((c) => {
+      const uses = usage.filter((u) => u.compositeId === c.id)
+      return {
+        composite: c,
+        count: uses.length,
+        lastUsedAt:
+          uses.length > 0 ? Math.max(...uses.map((u) => u.loggedAt)) : undefined,
+      }
+    })
+    const last = (r: (typeof list)[number]): number => r.lastUsedAt ?? r.composite.createdAt
+    switch (sort) {
+      case 'mostUsed':
+        return list.sort((a, b) => b.count - a.count || last(b) - last(a))
+      case 'leastUsed':
+        return list.sort((a, b) => a.count - b.count || last(a) - last(b))
+      case 'recent':
+        return list.sort((a, b) => last(b) - last(a))
+      case 'longAgo':
+        return list.sort((a, b) => last(a) - last(b))
+    }
+  }, [composites, usage, sort])
 
   async function toggleRetired(c: Composite): Promise<void> {
     await repo.putComposite({ ...c, retired: !c.retired })
@@ -421,36 +496,217 @@ function CompositeLibrary(props: { onEdit: (c: Composite) => void }) {
   }
 
   return (
-    <div class="list">
-      {rows.map((r) => (
-        <div
-          class="list-item"
-          key={r.composite.id}
-          style={r.composite.retired ? 'opacity:0.55' : ''}
-        >
-          <div style="flex:1;min-width:0">
-            <div class="title">{r.composite.name}</div>
-            <div class="meta">
-              v{r.composite.version} · {r.composite.components.length} components ·{' '}
-              {r.count === 0 ? 'never logged' : `logged ${r.count}×`}
-              {r.lastUsedAt !== undefined &&
-                ` · last ${new Date(r.lastUsedAt).toLocaleDateString()}`}
+    <>
+      <div class="chip-row" style="margin-bottom:8px">
+        {(Object.keys(SORT_LABELS) as LibrarySort[]).map((k) => (
+          <button key={k} class="chip" aria-pressed={sort === k} onClick={() => setSort(k)}>
+            {SORT_LABELS[k]}
+          </button>
+        ))}
+      </div>
+      <div class="list">
+        {rows.map((r) => (
+          <div
+            class="list-item"
+            key={r.composite.id}
+            style={`flex-wrap:wrap;${r.composite.retired ? 'opacity:0.55' : ''}`}
+          >
+            <div style="flex:1;min-width:0">
+              <div class="title">{r.composite.name}</div>
+              <div class="meta">
+                v{r.composite.version} · {r.composite.components.length} components ·{' '}
+                {r.count === 0 ? 'never logged' : `logged ${r.count}×`}
+                {r.lastUsedAt !== undefined &&
+                  ` · last ${new Date(r.lastUsedAt).toLocaleDateString()}`}
+                {r.composite.retired && ' · retired'}
+              </div>
+            </div>
+            <div class="row" style="gap:4px">
+              <button
+                class="btn btn-small btn-ghost"
+                onClick={() => props.onEdit(r.composite)}
+              >
+                Edit
+              </button>
+              <button
+                class="btn btn-small btn-ghost"
+                onClick={() => void toggleRetired(r.composite)}
+              >
+                {r.composite.retired ? 'Restore' : 'Retire'}
+              </button>
+              <button
+                class="btn btn-small btn-ghost"
+                onClick={() => props.onDelete(r.composite)}
+              >
+                Delete
+              </button>
             </div>
           </div>
-          <button
-            class="btn btn-small btn-ghost"
-            onClick={() => props.onEdit(r.composite)}
-          >
-            Edit
-          </button>
-          <button
-            class="btn btn-small btn-ghost"
-            onClick={() => void toggleRetired(r.composite)}
-          >
-            {r.composite.retired ? 'Restore' : 'Retire'}
-          </button>
+        ))}
+      </div>
+    </>
+  )
+}
+
+/**
+ * The copies written before each import and purge. One tap puts the
+ * database back exactly as it was.
+ */
+function Snapshots() {
+  const [list, setList] = useState<{ id?: number; at: number; reason: string }[]>([])
+  const [confirm, setConfirm] = useState<number | undefined>(undefined)
+
+  async function load(): Promise<void> {
+    setList(await repo.listSnapshots())
+  }
+  useEffect(() => {
+    void load()
+  }, [store.recentRollups.value])
+
+  async function restore(id: number): Promise<void> {
+    await restoreSnapshot(id)
+    await store.loadFoodIndex()
+    await store.refreshAll()
+    await engine.runDailyEngine()
+    await store.refreshHistory()
+    setConfirm(undefined)
+    store.notify('Put back as it was.')
+    await load()
+  }
+
+  const latest = list[0]
+  if (!latest || latest.id === undefined) return null
+  const id = latest.id
+  const when = new Date(latest.at).toLocaleString()
+  return (
+    <div style="margin-top:10px">
+      {confirm === id ? (
+        <div class="notice">
+          <div style="margin-bottom:8px">
+            Put everything back as it was before the {latest.reason} on {when}?
+            Anything logged since then is replaced.
+          </div>
+          <div class="row" style="gap:8px">
+            <button class="btn btn-small btn-primary" onClick={() => void restore(id)}>
+              Put it back
+            </button>
+            <button class="btn btn-small btn-ghost" onClick={() => setConfirm(undefined)}>
+              Cancel
+            </button>
+          </div>
         </div>
-      ))}
+      ) : (
+        <button class="btn btn-small btn-ghost btn-wide" onClick={() => setConfirm(id)}>
+          Undo the last {latest.reason} ({when})
+        </button>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Phase and precision mode.
+ *
+ * The mode switcher is a first-class control. Switching states plainly what
+ * changes and what each mode can feed; switching down is a legitimate
+ * choice, so there is no "are you sure".
+ *
+ * Leaving calibration is dual-gated: the date must pass AND the data must
+ * suffice. The app reports the gate; the user confirms.
+ */
+function PhaseAndMode() {
+  const profile = store.profile.value
+  const progress = store.progress.value
+  const latest = store.latestTdee.value
+  if (!profile) return null
+
+  const gate =
+    progress && profile.phase !== 'steady'
+      ? graduationGate({
+          progress,
+          ...(latest && latest.sufficient ? { tdeeSe: latest.standardError } : {}),
+        })
+      : undefined
+
+  async function setMode(mode: PrecisionMode): Promise<void> {
+    const next = { ...profile!, precisionMode: mode }
+    await repo.saveProfile(next)
+    store.profile.value = next
+    // The mode is recorded on the day: today switches, the past does not.
+    const t = today()
+    const day = await repo.getDay(t)
+    if (day) await repo.saveDay({ ...day, precisionMode: mode })
+    await store.afterEdit([t])
+  }
+
+  async function setPhase(phase: 'steady' | 'recalibration'): Promise<void> {
+    const t = today()
+    const next = {
+      ...profile!,
+      phase,
+      phaseStartDate: t,
+      // Recalibration is weighed; steady restores the chosen mode.
+      precisionMode: phase === 'recalibration' ? ('weighed' as const) : profile!.precisionMode,
+    }
+    delete (next as { phaseEndDate?: string }).phaseEndDate
+    await repo.saveProfile(next)
+    store.profile.value = next
+    const day = await repo.getDay(t)
+    if (day) await repo.saveDay({ ...day, phase, precisionMode: next.precisionMode })
+    await store.afterEdit([t])
+    store.notify(`${phaseLabel(phase)} from today.`)
+  }
+
+  return (
+    <div class="card">
+      <div class="card-title">Phase and precision</div>
+      <div class="row-between">
+        <span>{phaseLabel(profile.phase)}</span>
+        {profile.phase === 'steady' ? (
+          <button class="btn btn-small btn-ghost" onClick={() => void setPhase('recalibration')}>
+            Start recalibration
+          </button>
+        ) : (
+          <button
+            class="btn btn-small"
+            disabled={!gate?.passes}
+            onClick={() => void setPhase('steady')}
+          >
+            Move to steady state
+          </button>
+        )}
+      </div>
+      {gate && (
+        <div class="faint" style="margin-top:6px">
+          {gate.dateReached ? 'End date reached' : `Ends ${progress?.endDate ?? ''}`} ·{' '}
+          {Math.round(gate.loggedPct)}% of days logged (needs {GATE_MIN_LOGGED_PCT}%) ·{' '}
+          {gate.weightEntries} weight readings (needs {GATE_MIN_WEIGHT_ENTRIES}) ·{' '}
+          {gate.tdeeSe !== undefined
+            ? `expenditure known to ±${Math.round(gate.tdeeSe)} kcal (needs ±${GATE_MAX_TDEE_SE})`
+            : 'expenditure not measurable yet'}
+        </div>
+      )}
+
+      <div class="card-title" style="margin-top:14px">
+        Precision mode
+      </div>
+      <div class="chip-row">
+        {(['weighed', 'composite', 'minimal'] as const).map((m) => (
+          <button
+            key={m}
+            class="chip"
+            aria-pressed={profile.precisionMode === m}
+            onClick={() => void setMode(m)}
+          >
+            {precisionModeLabel(m)}
+          </button>
+        ))}
+      </div>
+      <div class="faint" style="margin-top:8px">
+        {PRECISION_MODE_INFO[profile.precisionMode].logs}{' '}
+        {PRECISION_MODE_INFO[profile.precisionMode].effort}.{' '}
+        {PRECISION_MODE_INFO[profile.precisionMode].feeds}
+      </div>
     </div>
   )
 }
@@ -673,55 +929,43 @@ function BackupSheet(props: { onClose: () => void }) {
   const [passphrase, setPassphrase] = useState('')
   const [confirmPlain, setConfirmPlain] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [importStatus, setImportStatus] = useState<string | undefined>(undefined)
-  const [importPassphrase, setImportPassphrase] = useState('')
-  const [pendingFile, setPendingFile] = useState<ArrayBuffer | undefined>(undefined)
 
-  async function collect(): Promise<BackupPayload> {
-    const [profile, settings, goals, days, entries, foods, composites, usage, backups] =
-      await Promise.all([
-        repo.getProfile(),
-        repo.getSettings(),
-        db.goals.toArray(),
-        db.days.toArray(),
-        db.entries.toArray(),
-        db.foods.toArray(),
-        db.composites.toArray(),
-        db.compositeUsage.toArray(),
-        db.backups.toArray(),
-      ])
-    return {
+  async function afterExport(encrypted: boolean): Promise<void> {
+    await repo.recordBackup({
+      recordCounts: await repo.recordCounts(),
+      encrypted,
       schemaVersion: SCHEMA_VERSION,
-      exportedAt: Date.now(),
-      ...(profile ? { profile } : {}),
-      settings,
-      goals,
-      days,
-      entries,
-      // Curated and USDA rows ship with the app; only local foods travel.
-      foods: foods.filter((f) => f.tier === 'custom' || f.tier === 'barcode'),
-      composites,
-      compositeUsage: usage,
-      backups,
-    }
+    })
+    store.profile.value = await repo.getProfile()
   }
 
   async function exportBackup(encrypted: boolean): Promise<void> {
     setBusy(true)
     try {
-      const payload = await collect()
+      const payload = await collectPayload()
       const blob = await writeBackup({
         payload,
         ...(encrypted ? { passphrase } : {}),
       })
       await capabilities.saveFile(backupFilename(payload.exportedAt, encrypted), blob)
-      await repo.recordBackup({
-        recordCounts: await repo.recordCounts(),
-        encrypted,
-        schemaVersion: SCHEMA_VERSION,
-      })
-      store.profile.value = await repo.getProfile()
+      await afterExport(encrypted)
       store.notify('Backup written to your downloads.')
+      props.onClose()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function exportJson(): Promise<void> {
+    setBusy(true)
+    try {
+      const payload = await collectPayload()
+      await capabilities.saveFile(
+        jsonFilename(payload.exportedAt),
+        new Blob([payloadToJson(payload)], { type: 'application/json' }),
+      )
+      await afterExport(false)
+      store.notify('JSON written to your downloads.')
       props.onClose()
     } finally {
       setBusy(false)
@@ -744,61 +988,12 @@ function BackupSheet(props: { onClose: () => void }) {
     store.notify('CSV written to your downloads.')
   }
 
-  async function pickImport(): Promise<void> {
-    const file = await capabilities.openFile('.mtb,application/octet-stream')
-    if (!file) return
-    const buffer = await file.arrayBuffer()
-    try {
-      const header = readHeader(buffer)
-      setPendingFile(buffer)
-      setImportStatus(
-        `${header.recordCounts['days'] ?? 0} days, ${header.recordCounts['entries'] ?? 0} entries, exported ${new Date(header.exportedAt).toLocaleDateString()}. ${header.encrypted ? 'Encrypted.' : 'Not encrypted.'}`,
-      )
-    } catch (e) {
-      setImportStatus(e instanceof Error ? e.message : 'Could not read that file.')
-    }
-  }
-
-  async function runImport(): Promise<void> {
-    if (!pendingFile) return
-    setBusy(true)
-    try {
-      const payload = await readBackup({
-        buffer: pendingFile,
-        ...(importPassphrase ? { passphrase: importPassphrase } : {}),
-      })
-      await db.transaction(
-        'rw',
-        [db.days, db.entries, db.foods, db.composites, db.compositeUsage, db.goals, db.profile, db.settings],
-        async () => {
-          await db.days.bulkPut(payload.days)
-          await db.entries.bulkPut(payload.entries)
-          await db.foods.bulkPut(payload.foods)
-          await db.composites.bulkPut(payload.composites)
-          await db.compositeUsage.bulkPut(payload.compositeUsage)
-          await db.goals.bulkPut(payload.goals)
-          if (payload.profile) await db.profile.put(payload.profile)
-          if (payload.settings) await db.settings.put(payload.settings)
-        },
-      )
-      repo.invalidateAllRollups()
-      await store.loadFoodIndex()
-      await store.refreshAll()
-      store.notify(`Restored ${payload.days.length} days.`)
-      props.onClose()
-    } catch (e) {
-      setImportStatus(e instanceof Error ? e.message : 'Import failed.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   return (
-    <Sheet title="Backup and export" onClose={props.onClose}>
+    <Sheet title="Export" onClose={props.onClose}>
       <div class="notice">
         This app holds the only copy of your data. Browser storage is evictable
         and is destroyed by "clear site data". A backup is what makes that
-        survivable.
+        survivable — and Import, beside Export in Settings, is how it comes back.
       </div>
 
       <label>
@@ -822,7 +1017,7 @@ function BackupSheet(props: { onClose: () => void }) {
         disabled={busy || passphrase.length === 0}
         onClick={() => void exportBackup(true)}
       >
-        Export encrypted backup
+        Export encrypted backup (.mtb)
       </button>
 
       <div class="divider" />
@@ -836,47 +1031,27 @@ function BackupSheet(props: { onClose: () => void }) {
         />
       </label>
       {confirmPlain && (
-        <button
-          class="btn btn-wide btn-ghost"
-          disabled={busy}
-          onClick={() => void exportBackup(false)}
-        >
-          Export unencrypted — not recommended
-        </button>
+        <>
+          <button
+            class="btn btn-wide btn-ghost"
+            disabled={busy}
+            onClick={() => void exportBackup(false)}
+          >
+            Unencrypted backup (.mtb) — not recommended
+          </button>
+          <button class="btn btn-wide btn-ghost" disabled={busy} onClick={() => void exportJson()}>
+            Plain JSON (.json) — for inspection or other tools
+          </button>
+        </>
       )}
 
       <button class="btn btn-wide btn-ghost" onClick={() => void exportCsv()}>
         Export plain CSV
       </button>
-
-      <div class="divider" />
-
-      <div class="card-title">Restore</div>
-      <button class="btn btn-wide btn-ghost" onClick={() => void pickImport()}>
-        Choose a backup file
-      </button>
-      {importStatus && <div class="notice">{importStatus}</div>}
-      {pendingFile && (
-        <>
-          <label>
-            Its passphrase
-            <input
-              type="password"
-              value={importPassphrase}
-              onInput={(e) =>
-                setImportPassphrase((e.target as HTMLInputElement).value)
-              }
-            />
-          </label>
-          <button
-            class="btn btn-primary btn-wide"
-            disabled={busy}
-            onClick={() => void runImport()}
-          >
-            Restore this backup
-          </button>
-        </>
-      )}
+      <div class="faint">
+        CSV is a flat table: it cannot carry saved meals, their versions or the
+        adjustment history, so it is not a backup. Notes travel intact.
+      </div>
     </Sheet>
   )
 }

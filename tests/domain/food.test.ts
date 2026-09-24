@@ -36,10 +36,12 @@ describe('curated table', () => {
     // high-fibre row legitimately reads below its macro sum. Everything else
     // should agree within a rounding margin.
     for (const f of foods) {
-      const implied = impliedKcal(f.per100g)
-      const fibreAllowance = f.per100g.fibre * 4
-      if (f.per100g.kcal < 20) continue
-      expect(implied - fibreAllowance, f.id).toBeLessThan(f.per100g.kcal * 1.25 + 10)
+      // The curated table is complete: every field is known.
+      const implied = impliedKcal(f.per100g)!
+      const fibreAllowance = f.per100g.fibre! * 4
+      const kcal = f.per100g.kcal!
+      if (kcal < 20) continue
+      expect(implied - fibreAllowance, f.id).toBeLessThan(kcal * 1.25 + 10)
     }
   })
 
@@ -173,8 +175,8 @@ describe('portion arithmetic', () => {
   it('scales a per-100g vector to a gram amount', () => {
     const oats = curatedFoods().find((f) => f.id === 'c_oats_dry')!
     const n = nutrientsForGrams(oats.per100g, 80)
-    expect(n.kcal).toBeCloseTo(oats.per100g.kcal * 0.8, 6)
-    expect(n.protein).toBeCloseTo(oats.per100g.protein * 0.8, 6)
+    expect(n.kcal).toBeCloseTo(oats.per100g.kcal! * 0.8, 6)
+    expect(n.protein).toBeCloseTo(oats.per100g.protein! * 0.8, 6)
   })
 })
 

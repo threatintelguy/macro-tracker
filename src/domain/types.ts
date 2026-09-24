@@ -34,17 +34,24 @@ export type Fidelity = 'weighed' | 'portioned' | 'estimated' | 'flagged'
 /** Where a resolved target number came from. Every field carries one. */
 export type TargetSource = 'formula' | 'observed' | 'user' | 'clamped' | 'preset'
 
-/** The nutrients tracked. Values are always for the stated gram amount. */
+/**
+ * The nutrients tracked. Values are always for the stated gram amount.
+ *
+ * Unknown is not zero. A field the user did not know is stored as `null`,
+ * never 0 -- a blank protein field stored as zero would silently drag the
+ * protein average down, and protein is the anchor metric. Every read path
+ * that sums, averages or compares a nutrient must handle the null.
+ */
 export type NutrientVector = {
-  kcal: number
-  protein: number
-  carbs: number
-  fat: number
-  satFat: number
-  fibre: number
-  sodium: number
-  addedSugar: number
-  alcohol: number
+  kcal: number | null
+  protein: number | null
+  carbs: number | null
+  fat: number | null
+  satFat: number | null
+  fibre: number | null
+  sodium: number | null
+  addedSugar: number | null
+  alcohol: number | null
 }
 
 export const NUTRIENT_KEYS = [
@@ -61,7 +68,7 @@ export const NUTRIENT_KEYS = [
 
 export type NutrientKey = (typeof NUTRIENT_KEYS)[number]
 
-export const ZERO_NUTRIENTS: NutrientVector = {
+export const ZERO_NUTRIENTS: Readonly<NutrientVector> = {
   kcal: 0,
   protein: 0,
   carbs: 0,
@@ -106,6 +113,11 @@ export type FoodItem = {
   createdAt?: number
   /** Recipes: a per-100g vector derived from ingredients and a yield weight. */
   recipe?: RecipeDefinition
+  /**
+   * Set when this custom food was forked from a near match ("close, but not
+   * quite"). Records the origin and which fields the user changed.
+   */
+  derivedFrom?: { ref: FoodRef; adjustedFields: string[] }
 }
 
 /** A pointer to a food plus enough identity to survive the food table changing. */
@@ -175,6 +187,17 @@ export type Entry = {
   parsedFrom?: string
   /** Set when this entry was produced by resolving a composite instance. */
   fromCompositeEntryId?: EntryId
+  /**
+   * On a composite's root row: the food the row's own grams and nutrients
+   * belong to. The root carries the instance as its source, so without this
+   * an "explode into components" could not name the first component.
+   */
+  componentRef?: FoodRef
+  /**
+   * Set when a similar food stood in for something not in the database.
+   * Logged at estimated fidelity, and findable in the needs-detail queue.
+   */
+  proxyFor?: { note: string }
   note?: string
   createdAt: number
 }
@@ -304,6 +327,92 @@ export type Settings = {
   fatGPerKg: number
   occasionWindowMinutes: number
   barcodeLookupEnabled: boolean
+}
+
+/**
+ * What remains of a deleted composite. Entries pin `compositeId` and
+ * `version`, so a hard delete would orphan history; the tombstone keeps the
+ * name so past days render as "Lincoln salad (deleted)". Past totals never
+ * lived in the definition, so nothing recalculates.
+ */
+export type CompositeTombstone = {
+  id: CompositeId
+  /** Preserved for historical display. */
+  name: string
+  /** ISO timestamp. */
+  deletedAt: string
+}
+
+export type AdjustmentTrigger = 'scheduled'
+
+/** The inputs as they stood when a note was appended, so notes do not repeat. */
+export type AdjustmentNote = {
+  at: number
+  text: string
+  adherencePct: number
+  observedTdee?: number
+}
+
+export type AdjustmentOutcome = 'adjusted' | 'held' | 'suppressed' | 'insufficient'
+
+/**
+ * Every evaluation of the adjustment rule, with its inputs and rationale.
+ * Append-only and never pruned: an event records a decision made on the
+ * evidence available at the time. A later edit that changes its inputs
+ * appends a note rather than rewriting it.
+ */
+export type AdjustmentEvent = {
+  id: string
+  /** Epoch ms. */
+  at: number
+  /** The evaluation date the event belongs to. */
+  date: LocalDate
+  trigger: AdjustmentTrigger
+  outcome: AdjustmentOutcome
+  windowStart: LocalDate
+  windowEnd: LocalDate
+  observedTdee?: number
+  observedTdeeSe?: number
+  trendKgPerWeek?: number
+  intendedKgPerWeek?: number
+  adherencePct: number
+  weightReadings: number
+  /** kcal/carbs target before and after. Equal when nothing was applied. */
+  before: { kcal: number; carbsG: number }
+  after: { kcal: number; carbsG: number }
+  /** The carbohydrate energy applied by this event, signed. */
+  deltaKcal: number
+  rationale: string
+  suppressedBy?: string[]
+  clamped?: boolean
+  /** Appended when a later edit changed this event's inputs. */
+  notes?: AdjustmentNote[]
+}
+
+/**
+ * A stored observed-TDEE estimate for the 21-day window ending on
+ * `windowEnd`. Estimates outside the current window are frozen: they were
+ * correct given what was known then, and rewriting them would make the
+ * expenditure chart unreproducible.
+ */
+export type TdeeEstimate = {
+  windowEnd: LocalDate
+  windowStart: LocalDate
+  kcal: number
+  standardError: number
+  sufficient: boolean
+  loggedDays: number
+  windowDays: number
+  computedAt: number
+}
+
+/** A full copy of the database, written before an import or a purge. */
+export type Snapshot = {
+  id?: number
+  at: number
+  reason: 'import' | 'purge'
+  /** JSON of a BackupPayload. */
+  payload: string
 }
 
 export type BackupMeta = {

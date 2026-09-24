@@ -15,6 +15,7 @@ import type {
   Composite,
   CompositeId,
   CompositeInstance,
+  CompositeTombstone,
   CompositeUsage,
   Component,
   Fidelity,
@@ -23,8 +24,19 @@ import type {
   NutrientVector,
   Override,
 } from '../types.ts'
-import { ZERO_NUTRIENTS } from '../types.ts'
-import { nutrientsForGrams, sumNutrients } from '../nutrition/index.ts'
+import { NUTRIENT_KEYS } from '../types.ts'
+import {
+  aggregateNutrients,
+  nutrientsForGrams,
+  type NutrientTotals,
+} from '../nutrition/index.ts'
+
+/** Every field unknown. What a row whose food cannot be found contributes. */
+export function unknownNutrients(): NutrientVector {
+  const out = {} as NutrientVector
+  for (const k of NUTRIENT_KEYS) out[k] = null
+  return out
+}
 
 export const MAX_COMPOSITE_DEPTH = 4
 
@@ -48,7 +60,8 @@ export type ResolutionProblem = {
 
 export type ResolutionResult = {
   rows: ResolvedComponent[]
-  totals: NutrientVector
+  /** Known sums with coverage; a row with an unknown field makes it a floor. */
+  totals: NutrientTotals
   totalGrams: number
   problems: ResolutionProblem[]
 }
@@ -56,6 +69,12 @@ export type ResolutionResult = {
 export type Lookups = {
   food: (id: FoodId) => FoodItem | undefined
   composite: (id: CompositeId) => Composite | undefined
+  /**
+   * The fallback for an id that no longer resolves: a deleted composite
+   * leaves a tombstone, so a dangling reference reads as "deleted" rather
+   * than as broken.
+   */
+  tombstone?: (id: CompositeId) => CompositeTombstone | undefined
 }
 
 /**
@@ -124,12 +143,15 @@ export function resolveCompositeInstance(
 
   const root = lookups.composite(instance.compositeId)
   if (!root) {
+    const tomb = lookups.tombstone?.(instance.compositeId)
     problems.push({
       kind: 'missing-composite',
-      message: `Composite "${instance.name}" is no longer in the library.`,
-      path: [instance.name],
+      message: tomb
+        ? `"${tomb.name}" was deleted. Entries already logged keep their totals.`
+        : `Composite "${instance.name}" is no longer in the library.`,
+      path: [tomb?.name ?? instance.name],
     })
-    return { rows, totals: { ...ZERO_NUTRIENTS }, totalGrams: 0, problems }
+    return { rows, totals: aggregateNutrients([]), totalGrams: 0, problems }
   }
 
   const components = componentsAtVersion(root, instance.version)
@@ -139,7 +161,7 @@ export function resolveCompositeInstance(
       message: `Version ${instance.version} of "${root.name}" is no longer stored. Showing nothing rather than the wrong definition.`,
       path: [root.name],
     })
-    return { rows, totals: { ...ZERO_NUTRIENTS }, totalGrams: 0, problems }
+    return { rows, totals: aggregateNutrients([]), totalGrams: 0, problems }
   }
 
   const overrideByIndex = new Map<number, Override>()
@@ -160,7 +182,7 @@ export function resolveCompositeInstance(
 
   return {
     rows,
-    totals: sumNutrients(rows.map((r) => r.nutrients)),
+    totals: aggregateNutrients(rows.map((r) => r.nutrients)),
     totalGrams: rows.reduce((a, r) => a + r.grams, 0),
     problems,
   }
@@ -233,11 +255,12 @@ function walk(ctx: {
           message: `"${component.ref.name}" is no longer in the food table.`,
           path: [...path, component.ref.name],
         })
+        // Unknown, not zero: a missing food contributes nothing known.
         rows.push({
           foodId: component.ref.foodId,
           name: component.ref.name,
           grams,
-          nutrients: { ...ZERO_NUTRIENTS },
+          nutrients: unknownNutrients(),
           path,
           fidelity,
           ...(overridden ? { overridden: true } : {}),
@@ -259,9 +282,12 @@ function walk(ctx: {
     // Nested composite.
     const child = lookups.composite(component.ref)
     if (!child) {
+      const tomb = lookups.tombstone?.(component.ref)
       problems.push({
         kind: 'missing-composite',
-        message: `A nested composite is no longer in the library.`,
+        message: tomb
+          ? `The nested composite "${tomb.name}" was deleted.`
+          : `A nested composite is no longer in the library.`,
         path,
       })
       continue
@@ -314,6 +340,22 @@ export function wouldCycle(
     }
   }
   return false
+}
+
+/**
+ * Composites whose current definition nests `id`. A delete is blocked while
+ * any exist: offering to cascade would let one tap destroy several
+ * definitions.
+ */
+export function compositeParents(
+  id: CompositeId,
+  composites: readonly Composite[],
+): Composite[] {
+  return composites.filter(
+    (c) =>
+      c.id !== id &&
+      c.components.some((comp) => comp.kind === 'composite' && comp.ref === id),
+  )
 }
 
 /** The nesting depth of a definition, counting the root as 1. */

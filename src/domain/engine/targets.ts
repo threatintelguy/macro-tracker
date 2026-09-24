@@ -107,6 +107,11 @@ export type ResolveTargetsInput = {
   goalDirection?: 'loss' | 'maintain' | 'gain'
   /** Present from phase 2 onward. When sufficient, it replaces the formula. */
   observedTdee?: ObservedTdee
+  /**
+   * Cumulative carbohydrate energy applied by the adjustment engine, signed.
+   * Carbohydrate absorbs every calorie change; protein and fat hold.
+   */
+  adjustmentKcal?: number
   /** Defaults to now; injected in tests. */
   now?: number
 }
@@ -152,6 +157,7 @@ export function resolveTargets(input: ResolveTargetsInput): ResolvedTargets {
     settings,
     goalDirection = 'maintain',
     observedTdee,
+    adjustmentKcal = 0,
     now = Date.now(),
   } = input
 
@@ -226,6 +232,16 @@ export function resolveTargets(input: ResolveTargetsInput): ResolvedTargets {
     fatSource = 'preset'
     proteinRationale = `${preset.label} preset: ${proteinPerKg} g/kg at ${weightKg.toFixed(1)} kg${goalDirection === 'loss' ? ', raised because energy is below maintenance' : ''}.`
     fatRationale = `${preset.label} preset: ${fatPerKg} g/kg at ${weightKg.toFixed(1)} kg.`
+  }
+
+  // --- Layer 3b: the adjustment engine's applied changes. Carbohydrate
+  // absorbs them, because carbs are computed as the remainder below.
+  if (adjustmentKcal !== 0) {
+    kcal = tv(
+      kcal.value + adjustmentKcal,
+      'observed',
+      `${kcal.rationale} Adjusted by ${adjustmentKcal > 0 ? '+' : ''}${Math.round(adjustmentKcal)} kcal of carbohydrate by the three-week review; the adjustment history in Trends says why.`,
+    )
   }
 
   const carbsG = carbsFromRemainder({

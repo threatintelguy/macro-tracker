@@ -18,7 +18,7 @@ import {
 } from '../../domain/composites/index.ts'
 import * as repo from '../../data/repositories.ts'
 import * as store from '../store.ts'
-import { Sheet, fmt } from './common.tsx'
+import { AggregateText, Sheet, fmt } from './common.tsx'
 
 export function CompositeEditor(props: {
   composite?: Composite
@@ -159,15 +159,15 @@ export function CompositeEditor(props: {
         </div>
         <div class="n">
           <span>kcal</span>
-          <span>{fmt(preview.totals.kcal)}</span>
+          <span><AggregateText agg={preview.totals.kcal} /></span>
         </div>
         <div class="n">
           <span>Protein</span>
-          <span>{fmt(preview.totals.protein, 1)} g</span>
+          <span><AggregateText agg={preview.totals.protein} dp={1} unit="g" /></span>
         </div>
         <div class="n">
           <span>Fat</span>
-          <span>{fmt(preview.totals.fat, 1)} g</span>
+          <span><AggregateText agg={preview.totals.fat} dp={1} unit="g" /></span>
         </div>
       </div>
 

@@ -7,9 +7,11 @@
  */
 
 import type {
+  AdjustmentEvent,
   Composite,
   CompositeId,
   CompositeInstance,
+  CompositeTombstone,
   CompositeUsage,
   DayRecord,
   Entry,
@@ -17,20 +19,34 @@ import type {
   Fidelity,
   FoodId,
   FoodItem,
+  FoodRef,
   Goal,
   LocalDate,
+  NutrientKey,
   NutrientVector,
+  Override,
   Phase,
   PrecisionMode,
   Profile,
   Settings,
+  Snapshot,
+  TdeeEstimate,
 } from '../domain/types.ts'
 import { db, defaultSettings } from './db.ts'
 import { rollupDay, type DayRollup } from '../domain/analytics/index.ts'
 import {
+  compositeParents,
   resolveCompositeInstance,
   type Lookups,
 } from '../domain/composites/index.ts'
+import {
+  fillUnknown,
+  fillUnknownPer100g,
+  needsDetail,
+  refoodEntry,
+  rescaleCompositeRows,
+  rescaleEntry,
+} from '../domain/editing.ts'
 import { addDays, today } from '../domain/dates.ts'
 import { registerFoods, resolveFood, unregisterFood } from '../food/registry.ts'
 import type { WeightReading } from '../domain/engine/weightTrend.ts'
@@ -106,6 +122,105 @@ export function emptyDay(
 
 export async function getDay(date: LocalDate): Promise<DayRecord | undefined> {
   return db.days.get(date)
+}
+
+/**
+ * How a day record is created when something is first written to it.
+ *
+ * Viewing a past day never creates a record; the first write does. The
+ * factory decides which phase and precision mode the new record carries,
+ * because a day renders in the context it was logged under -- and every
+ * write path must create the day, or a weight set on a past day would be
+ * dropped silently.
+ */
+let dayFactory: (date: LocalDate) => Promise<DayRecord> | DayRecord = (date) =>
+  emptyDay(date, 'calibration', 'weighed')
+
+export function setDayFactory(
+  fn: (date: LocalDate) => Promise<DayRecord> | DayRecord,
+): void {
+  dayFactory = fn
+}
+
+/** Get a day, creating it through the factory if it does not exist yet. */
+export async function getOrCreateDay(date: LocalDate): Promise<DayRecord> {
+  const existing = await db.days.get(date)
+  if (existing) return existing
+  const fresh = await dayFactory(date)
+  await db.days.put(fresh)
+  return fresh
+}
+
+/**
+ * The phase and mode a new record should carry: the nearest earlier day's,
+ * so a backfilled day inherits the context around it rather than today's.
+ */
+export async function contextForDate(
+  date: LocalDate,
+  fallback: { phase: Phase; precisionMode: PrecisionMode },
+): Promise<{ phase: Phase; precisionMode: PrecisionMode }> {
+  const earlier = await db.days.where('date').below(date).last()
+  if (earlier) return { phase: earlier.phase, precisionMode: earlier.precisionMode }
+  const later = await db.days.where('date').above(date).first()
+  if (later) return { phase: later.phase, precisionMode: later.precisionMode }
+  return fallback
+}
+
+/** The earliest date anything was recorded -- the diary's back limit. */
+export async function earliestRecordDate(): Promise<LocalDate | undefined> {
+  const [firstDay, firstEntry] = await Promise.all([
+    db.days.orderBy('date').first(),
+    db.entries.orderBy('date').first(),
+  ])
+  const dates = [firstDay?.date, firstEntry?.date].filter(
+    (d): d is LocalDate => d !== undefined,
+  )
+  return dates.length === 0 ? undefined : dates.sort()[0]
+}
+
+/**
+ * Write a day's note. Plain text, no limit worth enforcing, and no
+ * distinction between a note written that evening and one added weeks later.
+ * An empty note deletes it.
+ */
+export async function saveDayNote(date: LocalDate, note: string): Promise<void> {
+  const day = await getOrCreateDay(date)
+  const trimmed = note.trim()
+  const { note: _old, ...rest } = day
+  await db.days.put(trimmed.length === 0 ? rest : { ...rest, note })
+  invalidateRollup(date)
+}
+
+/** minimal mode: protein grams and a saturated-fat flag, bypassing entries. */
+export async function setMinimalDay(
+  date: LocalDate,
+  input: { proteinG?: number; satFatFlag?: 'low' | 'high' },
+): Promise<void> {
+  const day = await getOrCreateDay(date)
+  const { proteinOverride: _p, satFatFlag: _s, ...rest } = day
+  await db.days.put({
+    ...rest,
+    ...(input.proteinG !== undefined ? { proteinOverride: input.proteinG } : {}),
+    ...(input.satFatFlag !== undefined ? { satFatFlag: input.satFatFlag } : {}),
+  })
+  invalidateRollup(date)
+}
+
+/** Search notes: a plain case-insensitive substring match, newest first. */
+export async function searchNotes(
+  query: string,
+): Promise<{ date: LocalDate; note: string }[]> {
+  const q = query.trim().toLowerCase()
+  const days = await db.days.toArray()
+  return days
+    .filter(
+      (d): d is DayRecord & { note: string } =>
+        d.note !== undefined &&
+        d.note.trim().length > 0 &&
+        (q.length === 0 || d.note.toLowerCase().includes(q)),
+    )
+    .map((d) => ({ date: d.date, note: d.note }))
+    .sort((a, b) => (a.date < b.date ? 1 : -1))
 }
 
 export async function ensureDay(
@@ -201,6 +316,7 @@ export type NewEntryInput = {
   parsedFrom?: string
   note?: string
   fromCompositeEntryId?: EntryId
+  proxyFor?: { note: string }
 }
 
 export async function addEntry(input: NewEntryInput): Promise<Entry> {
@@ -209,6 +325,7 @@ export async function addEntry(input: NewEntryInput): Promise<Entry> {
     createdAt: Date.now(),
     ...input,
   }
+  await getOrCreateDay(entry.date)
   await db.transaction('rw', db.entries, db.days, async () => {
     await db.entries.put(entry)
     const day = await db.days.get(entry.date)
@@ -228,6 +345,7 @@ export async function addEntries(inputs: NewEntryInput[]): Promise<Entry[]> {
     ...input,
   }))
   const dates = [...new Set(entries.map((e) => e.date))]
+  for (const d of dates) await getOrCreateDay(d)
   await db.transaction('rw', db.entries, db.days, async () => {
     await db.entries.bulkPut(entries)
     for (const date of dates) {
@@ -268,15 +386,174 @@ export async function deleteEntry(id: EntryId): Promise<void> {
   invalidateRollup(existing.date)
 }
 
-/** Delete every row produced by one composite log. */
-export async function deleteCompositeLog(rootEntryId: EntryId): Promise<void> {
-  const all = await db.entries
+/** Every row produced by one composite log: the root and its children. */
+export async function compositeLogRows(rootEntryId: EntryId): Promise<Entry[]> {
+  const rows = await db.entries
     .where('id')
     .equals(rootEntryId)
     .or('fromCompositeEntryId')
     .equals(rootEntryId)
     .toArray()
+  // Root first, then children in the order they were logged.
+  return rows.sort((a, b) =>
+    a.id === rootEntryId ? -1 : b.id === rootEntryId ? 1 : a.createdAt - b.createdAt,
+  )
+}
+
+/** Delete every row produced by one composite log. */
+export async function deleteCompositeLog(rootEntryId: EntryId): Promise<void> {
+  const all = await compositeLogRows(rootEntryId)
   for (const e of all) await deleteEntry(e.id)
+}
+
+// --- Editing a logged entry -----------------------------------------------
+//
+// Edits are silent: no history, no badge. Every edit invalidates the day's
+// rollup; downstream recomputation (TDEE, adjustment notes) is the engine
+// service's job and is triggered by the caller with the dates returned.
+
+/** Change a plain entry's amount. Rescales the snapshot; never re-resolves. */
+export async function editEntryAmount(id: EntryId, grams: number): Promise<LocalDate[]> {
+  const existing = await db.entries.get(id)
+  if (!existing || !(grams > 0)) return []
+  await db.entries.put(rescaleEntry(existing, grams))
+  invalidateRollup(existing.date)
+  return [existing.date]
+}
+
+/** Change a plain entry's food. Re-resolves and takes a fresh snapshot. */
+export async function editEntryFood(
+  id: EntryId,
+  food: FoodItem,
+  grams?: number,
+): Promise<LocalDate[]> {
+  const existing = await db.entries.get(id)
+  if (!existing || existing.source.kind !== 'food') return []
+  await db.entries.put(refoodEntry(existing, food, grams ?? existing.grams))
+  invalidateRollup(existing.date)
+  return [existing.date]
+}
+
+/**
+ * Time, occasion and fidelity. Applied to every row of a composite log so
+ * the meal moves as one. A time change may cross an occasion boundary; the
+ * rollup re-buckets on its next read.
+ */
+export async function editEntryMeta(
+  id: EntryId,
+  patch: { at?: string | null; occasion?: string | null; fidelity?: Fidelity },
+): Promise<LocalDate[]> {
+  const existing = await db.entries.get(id)
+  if (!existing) return []
+  const rows =
+    existing.source.kind === 'composite' ? await compositeLogRows(id) : [existing]
+  const next = rows.map((r) => {
+    const { at: _at, occasion: _occ, ...rest } = r
+    const at = patch.at === undefined ? r.at : patch.at ?? undefined
+    const occasion =
+      patch.occasion === undefined ? r.occasion : patch.occasion ?? undefined
+    return {
+      ...rest,
+      ...(at !== undefined ? { at } : {}),
+      ...(occasion !== undefined ? { occasion } : {}),
+      fidelity: patch.fidelity ?? r.fidelity,
+    } satisfies Entry
+  })
+  await db.entries.bulkPut(next)
+  invalidateRollup(existing.date)
+  return [existing.date]
+}
+
+/** Change a composite log's multiplier. Rescales every row's snapshot. */
+export async function editCompositeMultiplier(
+  rootId: EntryId,
+  multiplier: number,
+): Promise<LocalDate[]> {
+  const rows = await compositeLogRows(rootId)
+  const root = rows[0]
+  if (!root || root.source.kind !== 'composite' || !(multiplier > 0)) return []
+  await db.entries.bulkPut(
+    rescaleCompositeRows(rows, root.source.multiplier, multiplier),
+  )
+  invalidateRollup(root.date)
+  return [root.date]
+}
+
+/**
+ * Change a composite log's component overrides. This changes what was
+ * eaten, so the instance re-resolves at its pinned version and the rows are
+ * replaced with a fresh snapshot. The root keeps its id, time and occasion.
+ */
+export async function editCompositeOverrides(
+  rootId: EntryId,
+  overrides: Override[],
+): Promise<{ dates: LocalDate[]; problems: string[] }> {
+  const rows = await compositeLogRows(rootId)
+  const root = rows[0]
+  if (!root || root.source.kind !== 'composite') return { dates: [], problems: [] }
+  const instance: CompositeInstance = { ...root.source, overrides }
+  const lookups = await makeLookups()
+  const resolved = resolveCompositeInstance(instance, lookups, root.fidelity)
+  const blocking = resolved.problems.filter(
+    (p) => p.kind !== 'cycle' && p.kind !== 'depth',
+  )
+  if (resolved.rows.length === 0 || blocking.length > 0) {
+    return { dates: [], problems: resolved.problems.map((p) => p.message) }
+  }
+  const next = resolvedRowsToEntries({
+    rows: resolved.rows,
+    rootId,
+    instance,
+    date: root.date,
+    ...(root.at !== undefined ? { at: root.at } : {}),
+    ...(root.occasion !== undefined ? { occasion: root.occasion } : {}),
+    createdAt: root.createdAt,
+  })
+  await db.transaction('rw', db.entries, db.days, async () => {
+    const oldIds = rows.map((r) => r.id)
+    await db.entries.bulkDelete(oldIds)
+    await db.entries.bulkPut(next)
+    const day = await db.days.get(root.date)
+    if (day) {
+      const kept = day.entries.filter((e) => !oldIds.includes(e))
+      await db.days.put({ ...day, entries: [...kept, ...next.map((e) => e.id)] })
+    }
+  })
+  invalidateRollup(root.date)
+  return { dates: [root.date], problems: resolved.problems.map((p) => p.message) }
+}
+
+/**
+ * Explode a composite log into loose entries, for the rare meal that
+ * diverged too far to express as overrides. Every snapshot is kept; only
+ * the grouping goes.
+ */
+export async function explodeCompositeLog(rootId: EntryId): Promise<LocalDate[]> {
+  const rows = await compositeLogRows(rootId)
+  const root = rows[0]
+  if (!root || root.source.kind !== 'composite') return []
+
+  let ref: FoodRef | undefined = root.componentRef
+  if (!ref) {
+    // Rows logged before componentRef existed: recover the first component
+    // from the definition, if it still resolves.
+    const lookups = await makeLookups()
+    const first = resolveCompositeInstance(root.source, lookups).rows[0]
+    if (first) ref = { kind: 'food', foodId: first.foodId, name: first.name }
+  }
+  const rootRef: FoodRef = ref ?? {
+    kind: 'food',
+    foodId: '',
+    name: `${root.source.name} — first component`,
+  }
+
+  const next = rows.map((r) => {
+    const { fromCompositeEntryId: _from, componentRef: _ref, ...rest } = r
+    return r.id === rootId ? { ...rest, source: rootRef } : rest
+  })
+  await db.entries.bulkPut(next)
+  invalidateRollup(root.date)
+  return [root.date]
 }
 
 // --- Foods ----------------------------------------------------------------
@@ -326,8 +603,72 @@ export async function putComposite(c: Composite): Promise<void> {
   await db.composites.put(c)
 }
 
+export async function getTombstones(): Promise<CompositeTombstone[]> {
+  return db.tombstones.toArray()
+}
+
+export type CompositeBlastRadius = {
+  /** Composite logs (root entries) pinned to this composite. */
+  entries: number
+  /** Distinct days carrying one. */
+  days: number
+  dates: LocalDate[]
+  /** Composites whose definition nests this one. Non-empty blocks a delete. */
+  parents: { id: CompositeId; name: string }[]
+}
+
+/** The real counts a delete confirmation states, and whether it is blocked. */
+export async function compositeBlastRadius(
+  id: CompositeId,
+): Promise<CompositeBlastRadius> {
+  const [entries, composites] = await Promise.all([
+    db.entries.toArray(),
+    db.composites.toArray(),
+  ])
+  const roots = entries.filter(
+    (e) => e.source.kind === 'composite' && e.source.compositeId === id,
+  )
+  const dates = [...new Set(roots.map((e) => e.date))].sort()
+  return {
+    entries: roots.length,
+    days: dates.length,
+    dates,
+    parents: compositeParents(id, composites).map((c) => ({ id: c.id, name: c.name })),
+  }
+}
+
+export class CompositeNestedError extends Error {
+  constructor(readonly parents: string[]) {
+    super(
+      `Used inside ${parents.map((p) => `"${p}"`).join(', ')}. Remove it from ${parents.length === 1 ? 'that meal' : 'those meals'} first.`,
+    )
+  }
+}
+
+/**
+ * Delete a composite definition and leave a tombstone.
+ *
+ * Past entries keep their snapshotted nutrients -- which is what totals
+ * were always computed from -- and render as "name (deleted)". Nothing
+ * recalculates, because nothing needs to. Blocked, naming the parents, when
+ * another composite nests this one.
+ */
 export async function deleteComposite(id: CompositeId): Promise<void> {
-  await db.composites.delete(id)
+  const composite = await db.composites.get(id)
+  if (!composite) return
+  const radius = await compositeBlastRadius(id)
+  if (radius.parents.length > 0) {
+    throw new CompositeNestedError(radius.parents.map((p) => p.name))
+  }
+  await db.transaction('rw', db.composites, db.tombstones, db.compositeUsage, async () => {
+    await db.tombstones.put({
+      id,
+      name: composite.name,
+      deletedAt: new Date().toISOString(),
+    })
+    await db.composites.delete(id)
+    await db.compositeUsage.where('compositeId').equals(id).delete()
+  })
 }
 
 export async function getCompositeUsage(): Promise<CompositeUsage[]> {
@@ -353,6 +694,54 @@ export async function compositeUsageStats(
 }
 
 /**
+ * Delete a composite AND every entry derived from it, recalculating the
+ * days they sat on. The one operation in the app that alters historical
+ * totals, so the caller must take a snapshot first and must have typed
+ * confirmation. Returns the dates whose totals changed.
+ */
+export async function purgeComposite(id: CompositeId): Promise<LocalDate[]> {
+  const radius = await compositeBlastRadius(id)
+  if (radius.parents.length > 0) {
+    throw new CompositeNestedError(radius.parents.map((p) => p.name))
+  }
+  const entries = await db.entries.toArray()
+  const rootIds = new Set(
+    entries
+      .filter((e) => e.source.kind === 'composite' && e.source.compositeId === id)
+      .map((e) => e.id),
+  )
+  const doomed = entries.filter(
+    (e) =>
+      rootIds.has(e.id) ||
+      (e.fromCompositeEntryId !== undefined && rootIds.has(e.fromCompositeEntryId)),
+  )
+  const doomedIds = new Set(doomed.map((e) => e.id))
+  const dates = [...new Set(doomed.map((e) => e.date))].sort()
+
+  await db.transaction(
+    'rw',
+    [db.entries, db.days, db.composites, db.compositeUsage, db.tombstones],
+    async () => {
+      await db.entries.bulkDelete([...doomedIds])
+      for (const date of dates) {
+        const day = await db.days.get(date)
+        if (day) {
+          await db.days.put({
+            ...day,
+            entries: day.entries.filter((e) => !doomedIds.has(e)),
+          })
+        }
+      }
+      await db.composites.delete(id)
+      await db.tombstones.delete(id)
+      await db.compositeUsage.where('compositeId').equals(id).delete()
+    },
+  )
+  for (const d of dates) invalidateRollup(d)
+  return dates
+}
+
+/**
  * Build the lookup pair the composite resolver needs.
  *
  * Foods resolve through the registry, which spans the bundled curated table,
@@ -366,9 +755,11 @@ export async function makeLookups(): Promise<Lookups> {
   ])
   registerFoods(foods)
   const compMap = new Map(composites.map((c) => [c.id, c]))
+  const tombs = new Map((await getTombstones()).map((t) => [t.id, t]))
   return {
     food: (id) => resolveFood(id),
     composite: (id) => compMap.get(id),
+    tombstone: (id) => tombs.get(id),
   }
 }
 
@@ -381,9 +772,11 @@ export async function logCompositeInstance(input: {
   date: LocalDate
   at?: string
   occasion?: string
+  /** Defaults to weighed; a meal built from estimated parts is `estimated`. */
+  fidelity?: Fidelity
 }): Promise<{ entries: Entry[]; problems: string[] }> {
   const lookups = await makeLookups()
-  const resolved = resolveCompositeInstance(input.instance, lookups)
+  const resolved = resolveCompositeInstance(input.instance, lookups, input.fidelity)
 
   // A row whose food cannot be resolved would be written at zero nutrients,
   // which is silently wrong data in a table that is never recomputed. Refuse
@@ -399,22 +792,17 @@ export async function logCompositeInstance(input: {
   // can group the meal and an edit can find every row it produced.
   const rootId = newId('e')
   const now = Date.now()
-  const entries: Entry[] = resolved.rows.map((row, i) => ({
-    id: i === 0 ? rootId : newId('e'),
+  const entries = resolvedRowsToEntries({
+    rows: resolved.rows,
+    rootId,
+    instance: input.instance,
     date: input.date,
     ...(input.at !== undefined ? { at: input.at } : {}),
     ...(input.occasion !== undefined ? { occasion: input.occasion } : {}),
-    source:
-      i === 0
-        ? input.instance
-        : { kind: 'food' as const, foodId: row.foodId, name: row.name },
-    grams: row.grams,
-    nutrients: row.nutrients,
-    fidelity: row.fidelity,
-    ...(i === 0 ? {} : { fromCompositeEntryId: rootId }),
-    createdAt: now + i,
-  }))
+    createdAt: now,
+  })
 
+  await getOrCreateDay(input.date)
   await db.transaction('rw', db.entries, db.days, db.compositeUsage, async () => {
     await db.entries.bulkPut(entries)
     const day = await db.days.get(input.date)
@@ -434,6 +822,115 @@ export async function logCompositeInstance(input: {
   return { entries, problems: resolved.problems.map((p) => p.message) }
 }
 
+function resolvedRowsToEntries(input: {
+  rows: ReturnType<typeof resolveCompositeInstance>['rows']
+  rootId: EntryId
+  instance: CompositeInstance
+  date: LocalDate
+  at?: string
+  occasion?: string
+  createdAt: number
+}): Entry[] {
+  return input.rows.map((row, i) => ({
+    id: i === 0 ? input.rootId : newId('e'),
+    date: input.date,
+    ...(input.at !== undefined ? { at: input.at } : {}),
+    ...(input.occasion !== undefined ? { occasion: input.occasion } : {}),
+    source:
+      i === 0
+        ? input.instance
+        : { kind: 'food' as const, foodId: row.foodId, name: row.name },
+    grams: row.grams,
+    nutrients: row.nutrients,
+    fidelity: row.fidelity,
+    ...(i === 0
+      ? { componentRef: { kind: 'food' as const, foodId: row.foodId, name: row.name } }
+      : { fromCompositeEntryId: input.rootId }),
+    createdAt: input.createdAt + i,
+  }))
+}
+
+// --- Needs detail ---------------------------------------------------------
+//
+// Anything logged with unknown nutrients or as a stand-in. A convenience,
+// never a nag: no badge escalation, no notification, no warning colour. An
+// item that sits here for a year is a legitimate outcome -- the day it
+// belongs to is still logged, which was the point.
+
+export async function needsDetailEntries(): Promise<Entry[]> {
+  const all = await db.entries.toArray()
+  return all
+    .filter(needsDetail)
+    .sort((a, b) =>
+      a.date === b.date ? a.createdAt - b.createdAt : a.date < b.date ? 1 : -1,
+    )
+}
+
+export async function needsDetailCount(): Promise<number> {
+  let n = 0
+  await db.entries.each((e) => {
+    if (needsDetail(e)) n++
+  })
+  return n
+}
+
+/**
+ * Fill an entry's unknown fields with values for the amount as eaten.
+ *
+ * With `updateFood`, the fix is carried back to the food per 100 g, and to
+ * every other entry of the same food that is missing the same fields -- the
+ * package in hand answers for all of them. Returns every date touched so
+ * the caller can recompute those days.
+ */
+export async function resolveEntryDetail(
+  id: EntryId,
+  values: Partial<Record<NutrientKey, number>>,
+  options: { updateFood?: boolean; clearProxy?: boolean } = {},
+): Promise<LocalDate[]> {
+  const entry = await db.entries.get(id)
+  if (!entry) return []
+  const touched = new Set<LocalDate>([entry.date])
+
+  const updated: Entry = { ...entry, nutrients: fillUnknown(entry.nutrients, values) }
+  if (options.clearProxy) delete updated.proxyFor
+  await db.entries.put(updated)
+
+  if (options.updateFood && entry.source.kind === 'food' && entry.grams > 0) {
+    const food = await db.foods.get(entry.source.foodId)
+    if (food && (food.tier === 'custom' || food.tier === 'barcode')) {
+      const per100g = fillUnknownPer100g(food.per100g, values, entry.grams)
+      await putFood({ ...food, per100g })
+      const siblings = await db.entries.toArray()
+      for (const e of siblings) {
+        if (e.id === id || e.source.kind !== 'food') continue
+        if (e.source.foodId !== food.id || !(e.grams > 0)) continue
+        const scaled: Partial<Record<NutrientKey, number>> = {}
+        for (const [k, v] of Object.entries(values) as [NutrientKey, number][]) {
+          scaled[k] = (v * e.grams) / entry.grams
+        }
+        const filled = fillUnknown(e.nutrients, scaled)
+        if (JSON.stringify(filled) !== JSON.stringify(e.nutrients)) {
+          await db.entries.put({ ...e, nutrients: filled })
+          touched.add(e.date)
+        }
+      }
+    }
+  }
+
+  for (const d of touched) invalidateRollup(d)
+  return [...touched]
+}
+
+/** Keep a stand-in as it is and take it out of the queue. */
+export async function clearProxy(id: EntryId): Promise<LocalDate[]> {
+  const entry = await db.entries.get(id)
+  if (!entry || !entry.proxyFor) return []
+  const { proxyFor: _p, ...rest } = entry
+  await db.entries.put(rest)
+  invalidateRollup(entry.date)
+  return [entry.date]
+}
+
 // --- Weight ---------------------------------------------------------------
 
 export async function setWeight(
@@ -441,8 +938,7 @@ export async function setWeight(
   kg: number,
   time?: string,
 ): Promise<void> {
-  const day = await db.days.get(date)
-  if (!day) return
+  const day = await getOrCreateDay(date)
   await db.days.put({
     ...day,
     weightKg: time !== undefined ? { value: kg, time } : { value: kg },
@@ -469,6 +965,50 @@ export async function latestWeightKg(): Promise<number | undefined> {
   return readings.length > 0 ? readings[readings.length - 1]!.kg : undefined
 }
 
+// --- Engine records -------------------------------------------------------
+
+export async function getAdjustments(): Promise<AdjustmentEvent[]> {
+  return db.adjustments.orderBy('at').toArray()
+}
+
+export async function putAdjustment(e: AdjustmentEvent): Promise<void> {
+  await db.adjustments.put(e)
+}
+
+export async function getTdeeEstimates(): Promise<TdeeEstimate[]> {
+  return db.tdeeEstimates.orderBy('windowEnd').toArray()
+}
+
+export async function putTdeeEstimates(list: TdeeEstimate[]): Promise<void> {
+  await db.tdeeEstimates.bulkPut(list)
+}
+
+// --- Snapshots ------------------------------------------------------------
+
+/** How many snapshots to keep. Each is a full copy, so not unbounded. */
+export const SNAPSHOTS_KEPT = 5
+
+export async function listSnapshots(): Promise<Omit<Snapshot, 'payload'>[]> {
+  const rows = await db.snapshots.orderBy('at').reverse().toArray()
+  return rows.map(({ payload: _p, ...rest }) => rest)
+}
+
+export async function getSnapshot(id: number): Promise<Snapshot | undefined> {
+  return db.snapshots.get(id)
+}
+
+export async function putSnapshot(s: Omit<Snapshot, 'id'>): Promise<number> {
+  const id = (await db.snapshots.add(s)) as number
+  const all = await db.snapshots.orderBy('at').toArray()
+  const excess = all.length - SNAPSHOTS_KEPT
+  if (excess > 0) {
+    await db.snapshots.bulkDelete(
+      all.slice(0, excess).map((r) => r.id).filter((x): x is number => x !== undefined),
+    )
+  }
+  return id
+}
+
 // --- Misc -----------------------------------------------------------------
 
 export async function recordBackup(meta: {
@@ -488,15 +1028,18 @@ export async function lastBackupAt(): Promise<number | undefined> {
 }
 
 export async function recordCounts(): Promise<Record<string, number>> {
-  const [days, entries, foods, composites, usage, goals] = await Promise.all([
-    db.days.count(),
-    db.entries.count(),
-    db.foods.count(),
-    db.composites.count(),
-    db.compositeUsage.count(),
-    db.goals.count(),
-  ])
-  return { days, entries, foods, composites, usage, goals }
+  const [days, entries, foods, composites, usage, goals, tombstones, adjustments] =
+    await Promise.all([
+      db.days.count(),
+      db.entries.count(),
+      db.foods.count(),
+      db.composites.count(),
+      db.compositeUsage.count(),
+      db.goals.count(),
+      db.tombstones.count(),
+      db.adjustments.count(),
+    ])
+  return { days, entries, foods, composites, usage, goals, tombstones, adjustments }
 }
 
 /** Days that exist between two dates, filling absent days as empty records. */

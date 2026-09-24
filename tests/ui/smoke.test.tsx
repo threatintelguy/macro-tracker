@@ -13,9 +13,8 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 
 // uPlot needs a real canvas, which jsdom does not provide. The chart is
 // covered by the trend tests; here it is stubbed out.
-vi.mock('../../src/ui/components/WeightChart.tsx', () => ({
-  WeightChart: () => null,
-  TrendSparkline: () => null,
+vi.mock('../../src/ui/components/TimeChart.tsx', () => ({
+  TimeChart: () => null,
 }))
 
 import { App } from '../../src/ui/App.tsx'
@@ -25,7 +24,7 @@ import * as store from '../../src/ui/store.ts'
 import { curatedFoods } from '../../src/food/curated.ts'
 import { makeNutrients } from '../../src/domain/nutrition/index.ts'
 import { bandState } from '../../src/ui/components/common.tsx'
-import { today } from '../../src/domain/dates.ts'
+import { addDays, today } from '../../src/domain/dates.ts'
 
 globalThis.ResizeObserver ??= class {
   observe(): void {}
@@ -86,6 +85,9 @@ beforeEach(async () => {
   store.ready.value = false
   store.profile.value = undefined
   store.tab.value = 'today'
+  store.selectedDate.value = today()
+  // The shell reads the tab from the hash on mount; do not inherit one.
+  location.hash = ''
   store.entries.value = []
   store.composites.value = []
   store.usage.value = []
@@ -116,10 +118,10 @@ describe('boot', () => {
     await seedProfile()
     await boot()
     expect(text()).toContain('Today')
-    // Three tabs, and no fourth.
+    // Four tabs -- Trends is the parent document's own screen -- and no fifth.
     const tabs = host.querySelectorAll('.tabbar button')
-    expect(tabs).toHaveLength(3)
-    expect([...tabs].map((t) => t.textContent)).toEqual(['Today', 'Log', 'Settings'])
+    expect(tabs).toHaveLength(4)
+    expect([...tabs].map((t) => t.textContent)).toEqual(['Today', 'Log', 'Trends', 'Settings'])
   })
 })
 
@@ -315,3 +317,158 @@ async function seedComposite(): Promise<void> {
     updatedAt: Date.now(),
   })
 }
+
+// --- Addendum 1 -------------------------------------------------------------
+
+function button(label: string): HTMLButtonElement {
+  const b = [...host.querySelectorAll('button')].find(
+    (x) => x.textContent?.trim() === label || x.getAttribute('aria-label') === label,
+  )
+  if (!b) throw new Error(`No button "${label}"`)
+  return b as HTMLButtonElement
+}
+
+describe('day navigation', () => {
+  it('disables forward on today and pages back to a past day', async () => {
+    await seedProfile()
+    await repo.addEntry({
+      date: addDays(today(), -2),
+      at: '08:00',
+      source: { kind: 'food', foodId: 'c_oats_dry', name: 'Oats, rolled, dry' },
+      grams: 80,
+      nutrients: makeNutrients({ kcal: 303, protein: 10.6 }),
+      fidelity: 'weighed',
+    })
+    await boot()
+    expect(button('Next day').disabled).toBe(true)
+    expect(button('Previous day').disabled).toBe(false)
+
+    button('Previous day').click()
+    await until(() => store.selectedDate.value === addDays(today(), -1), 'step back')
+    // A jump-to-today control appears whenever the view is off today.
+    expect(text()).toContain('Today')
+    expect(button('Next day').disabled).toBe(false)
+
+    button('Previous day').click()
+    await until(() => text().includes('Oats, rolled, dry'), 'past day entries')
+    // Edit sits beside Delete on the entry.
+    expect(button('Edit')).toBeTruthy()
+    expect(button('Delete')).toBeTruthy()
+    // The back limit is the earliest record.
+    expect(button('Previous day').disabled).toBe(true)
+
+    // Viewing a past day never created a record for the empty day between.
+    expect(await repo.getDay(addDays(today(), -1))).toBeUndefined()
+
+    button('Today').click()
+    await until(() => store.selectedDate.value === today(), 'back to today')
+  })
+
+  it('shows the note field on the day', async () => {
+    await seedProfile()
+    await boot()
+    expect(text()).toContain('Add a note about this day')
+  })
+})
+
+describe('logging foods not in the database', () => {
+  it('offers the four routes in order when search finds nothing', async () => {
+    await seedProfile()
+    await boot()
+    await goTo('log', 'Search a single food')
+    const input = host.querySelector('input[placeholder="Search foods"]') as HTMLInputElement
+    input.value = 'zzqqxx nothing like this'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await until(() => text().includes('Four ways to log it anyway'), 'routes')
+    const body = text()
+    const order = [
+      'Build it from ingredients',
+      'Start from something close',
+      'Enter only what you know',
+      'Log a stand-in',
+    ].map((t) => body.indexOf(t))
+    expect(order.every((i) => i >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+  })
+
+  it('offers "close, but not quite" beside each search result', async () => {
+    await seedProfile()
+    await boot()
+    await goTo('log', 'Search a single food')
+    const input = host.querySelector('input[placeholder="Search foods"]') as HTMLInputElement
+    input.value = 'oats'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await until(() => text().includes('Close, but not quite'), 'clone action')
+  })
+
+  it('shows the needs-detail count quietly, without a badge', async () => {
+    await seedProfile()
+    await repo.addEntry({
+      date: today(),
+      source: { kind: 'food', foodId: 'x', name: 'Menu item' },
+      grams: 300,
+      nutrients: makeNutrients({ kcal: 640, protein: null }),
+      fidelity: 'estimated',
+    })
+    await boot()
+    await goTo('log', 'Search a single food')
+    expect(text()).toContain('1 need detail')
+    expect(host.querySelector('.quiet-count')).toBeTruthy()
+    expect(host.querySelector('[data-tone="attention"].quiet-count')).toBeNull()
+  })
+
+  it('shows an incomplete protein total as a floor with coverage', async () => {
+    await seedProfile()
+    await seedDayWithFood()
+    await repo.addEntry({
+      date: today(),
+      at: '12:00',
+      source: { kind: 'food', foodId: 'x', name: 'Menu item' },
+      grams: 300,
+      nutrients: makeNutrients({ kcal: 640, protein: null }),
+      fidelity: 'estimated',
+    })
+    await boot()
+    expect(text()).toContain('at least 11 g')
+    expect(text()).toContain('1 of 2 entries')
+    expect(host.querySelector('.band-fill[data-state="unknown"]')).toBeTruthy()
+  })
+})
+
+describe('Trends', () => {
+  it('holds the analytics, adherence, adjustment history and note search', async () => {
+    await seedProfile()
+    await boot()
+    await goTo('trends', 'Weight and expenditure')
+    const body = text()
+    expect(body).toContain('Calories')
+    expect(body).toContain('Protein')
+    expect(body).toContain('Adherence')
+    expect(body).toContain('Why targets changed')
+    expect(body).toContain('Search notes')
+  })
+})
+
+describe('Settings: import beside export', () => {
+  it('pairs Export with Import and states the CSV limits before a file is chosen', async () => {
+    await seedProfile()
+    await boot()
+    await goTo('settings', 'Your data')
+    expect(button('Export')).toBeTruthy()
+    button('Import').click()
+    await until(() => text().includes('CSV brings in day and entry rows only'), 'import sheet')
+    expect(text()).toContain('not to move to a new phone')
+    // No merge mode is offered, let alone preselected, before a file is read.
+    expect(host.querySelector('[role="radio"][aria-checked="true"]')).toBeNull()
+  })
+
+  it('shows the precision mode switcher and the library sort', async () => {
+    await seedProfile()
+    await seedComposite()
+    await boot()
+    await goTo('settings', 'Phase and precision')
+    expect(text()).toContain('Precision mode')
+    expect(text()).toContain('Most used')
+    expect(text()).toContain('Not used lately')
+  })
+})

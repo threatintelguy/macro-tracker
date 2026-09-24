@@ -9,8 +9,10 @@
 
 import Dexie, { type Table } from 'dexie'
 import type {
+  AdjustmentEvent,
   BackupMeta,
   Composite,
+  CompositeTombstone,
   CompositeUsage,
   DayRecord,
   Entry,
@@ -18,6 +20,8 @@ import type {
   Goal,
   Profile,
   Settings,
+  Snapshot,
+  TdeeEstimate,
 } from '../domain/types.ts'
 import {
   DEFAULT_SECONDARY_TARGETS,
@@ -26,7 +30,7 @@ import {
 import { DEFAULT_OCCASION_WINDOW_MINUTES } from '../domain/analytics/index.ts'
 import { DEFAULT_PRESET } from '../domain/engine/targets.ts'
 
-export const SCHEMA_VERSION = 1
+export { SCHEMA_VERSION } from '../domain/schema.ts'
 
 export class MacroDb extends Dexie {
   days!: Table<DayRecord, string>
@@ -38,6 +42,10 @@ export class MacroDb extends Dexie {
   profile!: Table<Profile, string>
   settings!: Table<Settings, string>
   backups!: Table<BackupMeta, number>
+  tombstones!: Table<CompositeTombstone, string>
+  adjustments!: Table<AdjustmentEvent, string>
+  tdeeEstimates!: Table<TdeeEstimate, string>
+  snapshots!: Table<Snapshot, number>
 
   constructor(name = 'macro-tracker') {
     super(name)
@@ -52,6 +60,15 @@ export class MacroDb extends Dexie {
       profile: 'id',
       settings: 'id',
       backups: '++id, at',
+    })
+
+    // Additive only. Nullable nutrients need no index or row change, so
+    // there is no upgrade function: every existing row is already valid.
+    this.version(2).stores({
+      tombstones: 'id',
+      adjustments: 'id, date, at',
+      tdeeEstimates: 'windowEnd',
+      snapshots: '++id, at',
     })
   }
 }

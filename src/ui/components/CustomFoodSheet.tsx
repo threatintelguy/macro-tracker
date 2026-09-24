@@ -4,33 +4,81 @@
  * Always available, and the fallback when barcode misses. A recipe takes an
  * ingredient list plus a total yield weight and produces a per-100 g vector,
  * so a batch of chilli logs like any other food.
+ *
+ * The form requires nothing but a name. If a menu board says 640 calories
+ * and nothing else, the user enters 640 and stops: every blank is stored as
+ * unknown, never as zero, and the entry lands in the needs-detail list for
+ * whenever -- if ever -- the rest turns up.
+ *
+ * Cloning ("close, but not quite") starts from a near match: the user edits
+ * what they know, and provenance records the origin and which fields moved.
  */
 
 import { useMemo, useState } from 'preact/hooks'
-import type { FoodItem, NutrientVector } from '../../domain/types.ts'
-import { ZERO_NUTRIENTS } from '../../domain/types.ts'
+import type { FoodItem, NutrientKey, NutrientVector } from '../../domain/types.ts'
+import { NUTRIENT_KEYS } from '../../domain/types.ts'
 import {
-  makeNutrients,
   nutrientsForGrams,
   scaleNutrients,
   sumNutrients,
 } from '../../domain/nutrition/index.ts'
+import { adjustedFields } from '../../domain/editing.ts'
+import { unknownNutrients } from '../../domain/composites/index.ts'
 import * as repo from '../../data/repositories.ts'
 import * as store from '../store.ts'
-import { Sheet, fmt } from './common.tsx'
+import { Sheet, fmt, parseOptionalNumber } from './common.tsx'
 
 type Mode = 'label' | 'recipe'
 
 type Ingredient = { food: FoodItem; grams: number }
 
+const LABEL_FIELDS: readonly (readonly [NutrientKey, string])[] = [
+  ['kcal', 'Calories'],
+  ['protein', 'Protein (g)'],
+  ['carbs', 'Carbs (g)'],
+  ['fat', 'Fat (g)'],
+  ['satFat', 'Saturated fat (g)'],
+  ['fibre', 'Fibre (g)'],
+  ['sodium', 'Sodium (mg)'],
+  ['addedSugar', 'Added sugar (g)'],
+  ['alcohol', 'Alcohol (g)'],
+]
+
+function fieldsFrom(v: NutrientVector): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const k of NUTRIENT_KEYS) {
+    const x = v[k]
+    out[k] = x === null ? '' : String(Math.round(x * 100) / 100)
+  }
+  return out
+}
+
+function enteredVector(fields: Record<string, string>): NutrientVector {
+  const out = {} as NutrientVector
+  // Blank is unknown. Never zero.
+  for (const k of NUTRIENT_KEYS) out[k] = parseOptionalNumber(fields[k])
+  return out
+}
+
 export function CustomFoodSheet(props: {
   onClose: () => void
   onSaved: (food: FoodItem) => void
+  /** Prefill the name, e.g. from a search that found nothing. */
+  initialName?: string
+  /** "Close, but not quite": fork this food and adjust it. */
+  cloneFrom?: FoodItem
 }) {
+  const origin = props.cloneFrom
   const [mode, setMode] = useState<Mode>('label')
-  const [name, setName] = useState('')
+  const [name, setName] = useState(
+    origin ? `${origin.name} (adjusted)` : (props.initialName ?? ''),
+  )
   const [basis, setBasis] = useState('100')
-  const [fields, setFields] = useState<Record<string, string>>({})
+  // Labels do not list alcohol for foods without it -- a product containing
+  // alcohol must declare it -- so it starts at 0 and can be cleared.
+  const [fields, setFields] = useState<Record<string, string>>(
+    origin ? fieldsFrom(origin.per100g) : { alcohol: '0' },
+  )
   const [ingredients, setIngredients] = useState<Ingredient[]>([])
   const [yieldGrams, setYieldGrams] = useState('')
   const [query, setQuery] = useState('')
@@ -48,54 +96,38 @@ export function CustomFoodSheet(props: {
     [ingredients],
   )
 
-  function num(key: string): number {
-    const v = Number(fields[key])
-    return Number.isFinite(v) ? v : 0
-  }
-
   function per100gFromLabel(): NutrientVector {
     const b = Number(basis)
-    if (!Number.isFinite(b) || b <= 0) return { ...ZERO_NUTRIENTS }
-    const factor = 100 / b
-    return scaleNutrients(
-      makeNutrients({
-        kcal: num('kcal'),
-        protein: num('protein'),
-        carbs: num('carbs'),
-        fat: num('fat'),
-        satFat: num('satFat'),
-        fibre: num('fibre'),
-        sodium: num('sodium'),
-        addedSugar: num('addedSugar'),
-        alcohol: num('alcohol'),
-      }),
-      factor,
-    )
+    // An unreadable basis is treated as 100 g rather than blocking the save.
+    const factor = Number.isFinite(b) && b > 0 ? 100 / b : 1
+    return scaleNutrients(enteredVector(fields), factor)
   }
 
   function per100gFromRecipe(): NutrientVector {
     const y = Number(yieldGrams)
-    if (!Number.isFinite(y) || y <= 0) return { ...ZERO_NUTRIENTS }
-    // Recipe scaling is arithmetic on the yield.
+    if (!Number.isFinite(y) || y <= 0) return unknownNutrients()
+    // Recipe scaling is arithmetic on the yield. An ingredient with an
+    // unknown field makes the recipe's field unknown, not the sum of the rest.
     return scaleNutrients(recipeTotals, 100 / y)
   }
 
   const preview = mode === 'label' ? per100gFromLabel() : per100gFromRecipe()
+  // Name is the only thing required.
   const canSave =
     name.trim().length > 0 &&
-    (mode === 'label'
-      ? Number(basis) > 0
-      : ingredients.length > 0 && Number(yieldGrams) > 0)
+    (mode === 'label' || (ingredients.length > 0 && Number(yieldGrams) > 0))
 
   async function save(): Promise<void> {
+    if (!canSave) return
+    const b = Number(basis)
     const food: FoodItem = {
       id: repo.newId('x'),
       name: name.trim(),
       tier: 'custom',
       per100g: preview,
       portions:
-        mode === 'label' && Number(basis) > 0 && Number(basis) !== 100
-          ? [{ label: `1 serving (${fmt(Number(basis))} g)`, grams: Number(basis) }]
+        mode === 'label' && b > 0 && b !== 100
+          ? [{ label: `1 serving (${fmt(b)} g)`, grams: b }]
           : [],
       cookState: 'n/a',
       createdAt: Date.now(),
@@ -110,6 +142,14 @@ export function CustomFoodSheet(props: {
             },
           }
         : {}),
+      ...(origin
+        ? {
+            derivedFrom: {
+              ref: { kind: 'food' as const, foodId: origin.id, name: origin.name },
+              adjustedFields: adjustedFields(origin.per100g, preview),
+            },
+          }
+        : {}),
     }
     await repo.putFood(food)
     await store.loadFoodIndex()
@@ -118,23 +158,37 @@ export function CustomFoodSheet(props: {
   }
 
   return (
-    <Sheet title="New food" onClose={props.onClose}>
-      <div class="chip-row">
-        <button
-          class="chip"
-          aria-pressed={mode === 'label'}
-          onClick={() => setMode('label')}
-        >
-          From a label
-        </button>
-        <button
-          class="chip"
-          aria-pressed={mode === 'recipe'}
-          onClick={() => setMode('recipe')}
-        >
-          Recipe
-        </button>
-      </div>
+    <Sheet title={origin ? 'Close, but not quite' : 'New food'} onClose={props.onClose}>
+      {origin ? (
+        <div class="faint">
+          Starting from {origin.name}, per 100 g. Change what you know is
+          different — the new food remembers where it came from.
+        </div>
+      ) : (
+        <div class="faint">
+          Only the name is needed. Leave anything you do not know blank: a
+          blank is stored as unknown, never as zero, and can be filled in later.
+        </div>
+      )}
+
+      {!origin && (
+        <div class="chip-row">
+          <button
+            class="chip"
+            aria-pressed={mode === 'label'}
+            onClick={() => setMode('label')}
+          >
+            From a label
+          </button>
+          <button
+            class="chip"
+            aria-pressed={mode === 'recipe'}
+            onClick={() => setMode('recipe')}
+          >
+            Recipe
+          </button>
+        </div>
+      )}
 
       <label>
         Name
@@ -149,7 +203,7 @@ export function CustomFoodSheet(props: {
       {mode === 'label' ? (
         <>
           <label>
-            Values below are per this many grams
+            The values below are for this many grams
             <input
               type="number"
               inputMode="decimal"
@@ -157,24 +211,20 @@ export function CustomFoodSheet(props: {
               onInput={(e) => setBasis((e.target as HTMLInputElement).value)}
             />
           </label>
+          {!origin && (
+            <div class="faint">
+              A whole menu item or serving? Put its weight here — a guess is
+              fine — and enter the values for the whole thing.
+            </div>
+          )}
           <div class="field-row">
-            {(
-              [
-                ['kcal', 'Calories'],
-                ['protein', 'Protein (g)'],
-                ['carbs', 'Carbs (g)'],
-                ['fat', 'Fat (g)'],
-                ['satFat', 'Saturated fat (g)'],
-                ['fibre', 'Fibre (g)'],
-                ['sodium', 'Sodium (mg)'],
-                ['addedSugar', 'Added sugar (g)'],
-              ] as const
-            ).map(([key, label]) => (
+            {LABEL_FIELDS.map(([key, label]) => (
               <label key={key}>
                 {label}
                 <input
                   type="number"
                   inputMode="decimal"
+                  placeholder="unknown"
                   value={fields[key] ?? ''}
                   onInput={(e) =>
                     setFields((f) => ({
@@ -272,6 +322,11 @@ export function CustomFoodSheet(props: {
           {fmt(preview.carbs, 1)} C · {fmt(preview.fat, 1)} F ·{' '}
           {fmt(preview.satFat, 1)} sat · {fmt(preview.fibre, 1)} fibre
         </div>
+        {NUTRIENT_KEYS.some((k) => preview[k] === null) && (
+          <div class="faint" style="margin-top:4px">
+            — means unknown. It will be counted as unknown, not as zero.
+          </div>
+        )}
       </div>
 
       <button
