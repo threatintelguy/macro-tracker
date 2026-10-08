@@ -6,6 +6,12 @@
  * weighing flow, which is reachable in one tap and is the default action in
  * calibration. In minimal mode, the single protein-and-flag entry leads.
  *
+ * Search runs locally first, always. Below local results sits an explicit
+ * "Search online" tap; whatever is accepted from it is local from then on.
+ * For a meal with no label, recipe or scale, "Estimate a meal" drafts it
+ * from a description for review -- and works only as well as the library,
+ * which is why the library comes first.
+ *
  * When search comes up empty -- or none of the matches fit -- four routes
  * are offered, in this order, because the order is the design:
  *
@@ -34,13 +40,16 @@ import { FoodPickerSheet } from '../components/FoodPickerSheet.tsx'
 import { NeedsDetailSheet } from '../components/NeedsDetailSheet.tsx'
 import { EditEntrySheet } from '../components/EditEntrySheet.tsx'
 import { MinimalEntrySheet } from '../components/MinimalEntrySheet.tsx'
+import { EstimateSheet } from '../components/EstimateSheet.tsx'
+import { OnlineSearch, ResultRow } from '../components/FoodSearch.tsx'
+import { formatFood } from '../../domain/units.ts'
 import type { Entry, FoodItem } from '../../domain/types.ts'
 
 type Route =
   | { kind: 'build'; name: string }
   | { kind: 'clone-pick'; query: string }
   | { kind: 'clone'; food: FoodItem }
-  | { kind: 'known'; name: string }
+  | { kind: 'known'; name: string; readLabel?: boolean }
   | { kind: 'proxy-pick'; query: string }
   | { kind: 'proxy'; food: FoodItem; note: string }
 
@@ -57,6 +66,7 @@ export function Log() {
   const [query, setQuery] = useState('')
   const [rejected, setRejected] = useState(false)
   const [route, setRoute] = useState<Route | undefined>(undefined)
+  const [estimating, setEstimating] = useState(false)
 
   const ranked = store.rankedComposites.value
   const composite = store.composites.value.find((c) => c.id === logComposite)
@@ -142,6 +152,17 @@ export function Log() {
       </button>
 
       <div class="card">
+        <div class="card-title">No label, no recipe, nothing to weigh?</div>
+        <div class="faint" style="margin-bottom:10px">
+          Describe a restaurant meal and get a draft to check line by line.
+          Parts found in your library use its values.
+        </div>
+        <button class="btn btn-wide" onClick={() => setEstimating(true)}>
+          Estimate a meal
+        </button>
+      </div>
+
+      <div class="card">
         <div class="card-title">Search a single food</div>
         <input
           type="search"
@@ -155,30 +176,27 @@ export function Log() {
         {results.length > 0 && !rejected && (
           <div class="list" style="margin-top:10px">
             {results.map((r) => (
-              <div key={r.food.id} class="list-item result-row">
-                <button class="plain-button result-main" onClick={() => setQuickFood(r.food)}>
-                  <div class="title">{r.food.name}</div>
-                  <div class="meta">
-                    {fmt(r.food.per100g.kcal)} kcal ·{' '}
-                    {fmt(r.food.per100g.protein, 1)} g protein per 100 g
-                  </div>
-                </button>
-                <span class="tier-tag" data-tier={r.food.tier}>
-                  {r.food.tier}
-                </span>
-                <button
-                  class="btn btn-small btn-ghost"
-                  onClick={() => setRoute({ kind: 'clone', food: r.food })}
-                >
-                  Close, but not quite
-                </button>
-              </div>
+              <ResultRow
+                key={r.food.id}
+                result={r}
+                onPick={setQuickFood}
+                actions={
+                  <button
+                    class="btn btn-small btn-ghost"
+                    onClick={() => setRoute({ kind: 'clone', food: r.food })}
+                  >
+                    Close, but not quite
+                  </button>
+                }
+              />
             ))}
             <button class="btn btn-small btn-ghost btn-wide" onClick={() => setRejected(true)}>
               None of these fit
             </button>
           </div>
         )}
+
+        {searched && <OnlineSearch query={query} onAccepted={setQuickFood} />}
 
         {showRoutes && (
           <div class="routes">
@@ -233,6 +251,12 @@ export function Log() {
         <div class="row" style="gap:8px;margin-top:10px">
           <button class="btn btn-small" onClick={() => setShowBarcode(true)}>
             Barcode
+          </button>
+          <button
+            class="btn btn-small"
+            onClick={() => setRoute({ kind: 'known', name: '', readLabel: true })}
+          >
+            Read a label
           </button>
           <button class="btn btn-small btn-ghost" onClick={() => setShowCustom(true)}>
             New food
@@ -311,9 +335,23 @@ export function Log() {
           }}
         />
       )}
+      {estimating && (
+        <EstimateSheet
+          onClose={() => setEstimating(false)}
+          onBuild={(name) => {
+            setEstimating(false)
+            setRoute({ kind: 'build', name })
+          }}
+          onKnown={(name) => {
+            setEstimating(false)
+            setRoute({ kind: 'known', name })
+          }}
+        />
+      )}
       {route?.kind === 'known' && (
         <CustomFoodSheet
           initialName={route.name}
+          {...(route.readLabel ? { readLabel: true } : {})}
           onClose={() => setRoute(undefined)}
           onSaved={(food) => {
             setRoute(undefined)
@@ -396,7 +434,7 @@ function Diary(props: { onClose: () => void }) {
                       {deleted && ' (deleted)'}
                     </div>
                     <div class="meta">
-                      {e.at ?? '--:--'} · {fmt(e.grams)} g ·{' '}
+                      {e.at ?? '--:--'} · {formatFood(e.grams, store.units.value.food)} ·{' '}
                       {e.nutrients.kcal === null ? '? kcal' : `${fmt(e.nutrients.kcal)} kcal`}
                       {e.source.kind === 'composite' &&
                         ` · ${e.source.multiplier}× v${e.source.version}`}
@@ -419,7 +457,10 @@ function Diary(props: { onClose: () => void }) {
                   <div class="entry-row nested" key={c.id}>
                     <span>{c.source.name}</span>
                     <span class="grams">
-                      {fmt(c.grams)} g · {fmt(c.nutrients.kcal)} kcal
+                      {formatFood(c.grams, store.units.value.food)} · {fmt(c.nutrients.kcal)} kcal
+                      {c.lineSource && c.lineSource !== 'db' && (
+                        <span class="source-tag">{c.lineSource}</span>
+                      )}
                     </span>
                   </div>
                 ))}

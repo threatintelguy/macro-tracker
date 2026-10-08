@@ -112,15 +112,52 @@ describe('no third-party runtime references', () => {
     expect(offenders).toEqual([])
   })
 
-  it('makes exactly one outbound host reachable from the source', () => {
+  it('names exactly the known outbound hosts in the source', () => {
+    // The CSP's connect-src has to allow https, because the optional model
+    // endpoint is whatever the user configures. This test is where the host
+    // allowlist lives instead: a new host in the source fails the build.
     const hosts = new Set<string>()
     for (const file of sourceFiles('src')) {
       const source = readFileSync(file, 'utf8')
-      for (const m of source.matchAll(/https:\/\/([a-z0-9.-]+)/gi)) {
+      for (const m of source.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)) {
         hosts.add(m[1]!.toLowerCase())
       }
     }
-    // Open Food Facts, and nothing else.
-    expect([...hosts].sort()).toEqual(['world.openfoodfacts.org'])
+    // Open Food Facts (barcode and text search) and USDA FoodData Central
+    // (text search). The model download's hosts come from the model
+    // library's own catalogue; the external endpoint from the user.
+    expect([...hosts].sort()).toEqual(['api.nal.usda.gov', 'world.openfoodfacts.org'])
+  })
+
+  it('calls fetch only from the audited modules', () => {
+    // Every outbound request is built in one of these, each of which sends
+    // `credentials: 'omit'` and no referrer, fires only on an explicit tap,
+    // and is refused in offline mode. usda.ts fetches the bundled index from
+    // the app's own origin.
+    const allowed = new Set([
+      'src/food/barcode.ts',
+      'src/food/online.ts',
+      'src/food/usda.ts',
+      'src/estimate/external.ts',
+    ])
+    const offenders: string[] = []
+    for (const file of sourceFiles('src', ['.ts', '.tsx'])) {
+      const normalised = file.replace(/\\/g, '/')
+      const source = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/.*$/gm, '$1')
+      if (/\b(?:fetch|fetchImpl)\s*\(|\bXMLHttpRequest\b|\bsendBeacon\b|\bWebSocket\b/.test(source)) {
+        if (!allowed.has(normalised)) offenders.push(normalised)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('sends no cookies and no referrer on any outbound request', () => {
+    for (const file of ['src/food/barcode.ts', 'src/food/online.ts', 'src/estimate/external.ts']) {
+      const source = readFileSync(file, 'utf8')
+      expect(source, file).toContain("credentials: 'omit'")
+      expect(source, file).toContain("referrerPolicy: 'no-referrer'")
+    }
   })
 })

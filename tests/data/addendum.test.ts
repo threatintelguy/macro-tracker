@@ -893,7 +893,7 @@ describe('schema migration', () => {
 
     const v2 = new MacroDb(name)
     await v2.open()
-    expect(v2.verno).toBe(2)
+    expect(v2.verno).toBe(3)
     expect(await v2.entries.get('e1')).toEqual(row)
     expect(await v2.tombstones.count()).toBe(0)
     expect(await v2.adjustments.count()).toBe(0)

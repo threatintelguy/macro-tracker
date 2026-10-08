@@ -940,3 +940,112 @@ label {
   background: var(--bg);
   padding: 6px 0;
 }
+
+/* --- Addendum 2 ---------------------------------------------------------- */
+
+/* Body weight in both units: preferred first and larger. */
+.dual-weight {
+  white-space: nowrap;
+}
+.dual-secondary {
+  font-size: 0.62em;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+/* The 7-day average under each of today's figures: small and quiet. */
+.avg-line {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+}
+
+/*
+ * The floating add button. Bottom right, above the tab bar, and persistent
+ * while scrolling. Accent, not a warning colour.
+ */
+.fab {
+  position: fixed;
+  right: max(var(--gutter), calc((100vw - 640px) / 2 + var(--gutter)));
+  bottom: calc(var(--tab-height) + 16px + env(safe-area-inset-bottom));
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 1.9rem;
+  line-height: 1;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.35);
+  z-index: 15;
+  cursor: pointer;
+}
+.fab:active {
+  transform: scale(0.96);
+}
+
+/* Where a line's numbers came from: db, model, prep. Neutral, never a warning. */
+.source-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  vertical-align: middle;
+}
+.source-tag[data-source='db'] {
+  color: var(--in-band);
+}
+
+.tier-tag[data-origin='usda-branded'],
+.tier-tag[data-origin='online'] {
+  color: var(--neutral);
+}
+
+/* Online results are not local yet: set apart and labelled. */
+.online-results {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.alternatives {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding: 4px 0 0 4px;
+}
+.alternatives summary {
+  cursor: pointer;
+  color: var(--text-faint);
+}
+
+.estimate-line {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.estimate-line[data-pinned='true'] {
+  border-color: color-mix(in srgb, var(--in-band) 45%, transparent);
+}
+
+.photo-thumb {
+  max-width: 100%;
+  max-height: 220px;
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+/* Room under the last card so the floating button never covers it. */
+.screen:has(> .fab) {
+  padding-bottom: 92px;
+}

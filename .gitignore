@@ -12,6 +12,9 @@ public/usda-subset.bin
 public/usda-subset.meta.json
 scripts/.fdc-cache/
 
+# OCR engine, copied from node_modules at dev and build time.
+public/tesseract/
+
 # The design document stays local. It names the user and carries their body
 # weight, height and age, none of which belong in a public repo. The code
 # itself holds no personal data -- the profile lives in IndexedDB, entered at
@@ -20,3 +23,4 @@ Lincoln — Macro Tracker Design Document.md
 *Design Document.md
 # Design addenda name the user too; they stay local like the parent document.
 *Design Addendum*.docx
+*Design Addendum*.md

@@ -15,7 +15,32 @@ import type { LocalDate } from '../../domain/types.ts'
 import { formatDisplayDate } from '../../domain/dates.ts'
 import * as repo from '../../data/repositories.ts'
 import * as store from '../store.ts'
-import { TimeChart, type Marker, type SeriesSpec } from './TimeChart.tsx'
+import { TimeChart, type AltAxis, type Marker, type SeriesSpec } from './TimeChart.tsx'
+import { formatBodyWeight, kgToLb, lbToKg, type BodyWeightUnit } from '../../domain/units.ts'
+
+/**
+ * Weight series in the preferred unit, with legend values in both. Stored
+ * values are kilograms; the conversion happens here, at display time.
+ */
+export function weightDisplay(unit: BodyWeightUnit): {
+  toDisplay: (kg: number) => number
+  format: (v: number) => string
+  alt: AltAxis
+} {
+  const toDisplay = unit === 'lb' ? kgToLb : (kg: number) => kg
+  const toKg = unit === 'lb' ? lbToKg : (v: number) => v
+  return {
+    toDisplay,
+    format: (v) => formatBodyWeight(toKg(v), unit),
+    alt: {
+      convert: unit === 'lb' ? lbToKg : kgToLb,
+      unit: unit === 'lb' ? 'kg' : 'lb',
+      // Ticks a pound apart are under half a kilogram apart: whole numbers
+      // would repeat.
+      dp: 1,
+    },
+  }
+}
 
 export type Horizon = 30 | 90 | 365 | 0
 
@@ -47,29 +72,31 @@ export function WeightChart(props: {
     [props.points, props.horizonDays],
   )
   const dates = useMemo(() => points.map((p) => p.date), [points])
+  const unit = store.units.value.bodyWeight
+  const display = useMemo(() => weightDisplay(unit), [unit])
   const series = useMemo<SeriesSpec[]>(
     () => [
       {
         label: 'Trend',
-        values: points.map((p) => p.trend),
+        values: points.map((p) => display.toDisplay(p.trend)),
         color: '--accent',
         kind: 'line',
         scale: 'left',
-        unit: 'kg',
-        dp: 2,
+        unit,
+        format: display.format,
       },
       {
         // Dots only: the raw series is never the headline.
         label: 'Reading',
-        values: points.map((p) => p.raw ?? null),
+        values: points.map((p) => (p.raw === undefined ? null : display.toDisplay(p.raw))),
         color: '--text-faint',
         kind: 'dots',
         scale: 'left',
-        unit: 'kg',
-        dp: 1,
+        unit,
+        format: display.format,
       },
     ],
-    [points],
+    [points, display, unit],
   )
   const markers = useMemo<Marker[]>(() => {
     const first = dates[0]
@@ -97,6 +124,7 @@ export function WeightChart(props: {
         markers={markers}
         onMarker={setPicked}
         height={props.height ?? 190}
+        altAxis={display.alt}
       />
       {picked && notes.get(picked.date) && (
         <div class="picked-note" role="status">

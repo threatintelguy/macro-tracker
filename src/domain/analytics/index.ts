@@ -1,9 +1,11 @@
 /**
  * Rollups, occasions, and rolling averages.
  *
- * Every headline figure in the app is a 7-day rolling average. Daily values
- * exist and are inspectable, but they are never the primary display: daily
- * targets invite all-or-nothing thinking and daily variance is mostly noise.
+ * Today's screen shows today's figures, with the 7-day average as a quiet
+ * secondary line; Trends stays rolling-average based. Today's protein is
+ * actionable, averages are diagnostic. What guards against all-or-nothing
+ * thinking is the treatment -- bands rather than thresholds, never red, no
+ * language of over or under -- not hiding the day's number.
  *
  * Every total here is an `Aggregate`: the sum of known contributions plus
  * its coverage. Unknown is not zero, so an incomplete total is a floor --
@@ -20,7 +22,7 @@ import type {
   Phase,
   PrecisionMode,
 } from '../types.ts'
-import { NUTRIENT_KEYS } from '../types.ts'
+import { ESTIMATED_FIDELITIES, FIDELITIES, NUTRIENT_KEYS } from '../types.ts'
 import {
   UNKNOWN_AGGREGATE,
   aggregateNutrients,
@@ -230,10 +232,11 @@ export function dayConfidence(
   if (entries.length === 0) {
     return day.proteinOverride !== undefined ? 'minimal' : 'empty'
   }
+  // AI estimates are excluded here, through the same path as any other
+  // estimate: bookkeeping, not a penalty.
   const hasEstimate = entries.some(
     (e) =>
-      e.fidelity === 'estimated' ||
-      e.fidelity === 'flagged' ||
+      ESTIMATED_FIDELITIES.has(e.fidelity) ||
       e.proxyFor !== undefined ||
       e.nutrients.kcal === null,
   )
@@ -268,6 +271,8 @@ export type NutrientSeries = {
   values: Record<NutrientKey, (number | undefined)[]>
   complete: Record<NutrientKey, boolean[]>
   confidence: DayConfidence[]
+  /** Days carrying an AI estimate: included, drawn distinctly. */
+  aiEstimated: boolean[]
 }
 
 /** Build a dense day-by-day series over a range, gaps included as undefined. */
@@ -291,10 +296,12 @@ export function buildSeries(
     complete[k] = []
   }
   const confidence: DayConfidence[] = []
+  const aiEstimated: boolean[] = []
 
   for (const d of dates) {
     const r = byDate.get(d)
     confidence.push(r?.confidence ?? 'empty')
+    aiEstimated.push(r?.fidelities.includes('ai_estimated') ?? false)
     for (const k of NUTRIENT_KEYS) {
       const agg = r && r.confidence !== 'empty' ? r.totals[k] : undefined
       // A field with no known contribution at all is a gap, not a zero.
@@ -303,7 +310,7 @@ export function buildSeries(
     }
   }
 
-  return { dates, values, complete, confidence }
+  return { dates, values, complete, confidence, aiEstimated }
 }
 
 /**
@@ -412,7 +419,16 @@ export function fidelityLabel(f: Fidelity): string {
       return 'Listed serving'
     case 'estimated':
       return 'Estimated'
+    case 'ai_estimated':
+      return 'Estimated by model'
     case 'flagged':
       return 'Flagged'
   }
+}
+
+/** The least exact fidelity in a list, which is what describes the whole. */
+export function lowestFidelity(fidelities: readonly Fidelity[]): Fidelity {
+  let worst = 0
+  for (const f of fidelities) worst = Math.max(worst, FIDELITIES.indexOf(f))
+  return FIDELITIES[worst] ?? 'weighed'
 }

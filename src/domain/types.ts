@@ -10,6 +10,8 @@
  *      keeps history correct when a target or formula changes retroactively.
  */
 
+import type { UnitPrefs } from './units.ts'
+
 export type EntryId = string
 export type CompositeId = string
 export type FoodId = string
@@ -29,7 +31,49 @@ export type PrecisionMode = 'weighed' | 'composite' | 'minimal'
  * A weighed meal inside a minimal week keeps its full fidelity -- this field
  * is what makes precision-as-a-dial work rather than precision-as-a-ratchet.
  */
-export type Fidelity = 'weighed' | 'portioned' | 'estimated' | 'flagged'
+export type Fidelity = 'weighed' | 'portioned' | 'estimated' | 'flagged' | 'ai_estimated'
+
+/**
+ * Every fidelity, in order from most to least exact. Anything that ranks or
+ * lists fidelities reads this rather than its own copy, so widening the
+ * enum cannot leave a stale list behind.
+ */
+export const FIDELITIES: readonly Fidelity[] = [
+  'weighed',
+  'portioned',
+  'estimated',
+  'ai_estimated',
+  'flagged',
+]
+
+/**
+ * Fidelities whose intake figure is a guess rather than a measurement. A day
+ * carrying any of them is excluded from observed TDEE -- the one calculation
+ * that depends on intake accuracy -- while still counting in every trend.
+ */
+export const ESTIMATED_FIDELITIES: ReadonlySet<Fidelity> = new Set<Fidelity>([
+  'estimated',
+  'ai_estimated',
+  'flagged',
+])
+
+/** Which model tier produced an estimate. */
+export type EstimateTier = 'on-device' | 'external'
+
+/**
+ * Provenance of an AI-estimated entry. If an external model reads sodium
+ * high and the local one low, a year of mixed entries is uninterpretable
+ * without knowing which produced which.
+ */
+export type EstimateSource = {
+  tier: EstimateTier
+  model: string
+  /** ISO timestamp. */
+  at: string
+}
+
+/** Where one line of an estimate got its numbers. */
+export type LineSource = 'db' | 'model' | 'prep'
 
 /** Where a resolved target number came from. Every field carries one. */
 export type TargetSource = 'formula' | 'observed' | 'user' | 'clamped' | 'preset'
@@ -80,8 +124,25 @@ export const ZERO_NUTRIENTS: Readonly<NutrientVector> = {
   alcohol: 0,
 }
 
-/** Which tier a food came from, ranked by trustworthiness. */
-export type FoodTier = 'curated' | 'usda' | 'custom' | 'barcode'
+/**
+ * Where a food is stored. Curated and USDA rows ship with the app; custom,
+ * barcode and online rows live only on this device.
+ */
+export type FoodTier = 'curated' | 'usda' | 'custom' | 'barcode' | 'online'
+
+/**
+ * Where a food came from, which drives search ranking and the library
+ * badge. Finer than the tier: the bundled USDA index holds both generic
+ * foods and a curated slice of branded ones, and generic foods must not
+ * drown under branded near-duplicates.
+ */
+export type FoodOrigin =
+  | 'curated'
+  | 'usda-generic'
+  | 'usda-branded'
+  | 'barcode'
+  | 'online'
+  | 'custom'
 
 /** Raw vs cooked state, for the foods where it materially differs. */
 export type CookState = 'raw' | 'cooked' | 'n/a'
@@ -118,6 +179,13 @@ export type FoodItem = {
    * quite"). Records the origin and which fields the user changed.
    */
   derivedFrom?: { ref: FoodRef; adjustedFields: string[] }
+  /** Ranking and badge. Absent on rows written before Addendum 2; see `foodOrigin`. */
+  origin?: FoodOrigin
+  /**
+   * Set on a food created from a model's estimate rather than a database or
+   * label: a component the library did not have, or a preparation allowance.
+   */
+  estimate?: { line: 'model' | 'prep' } & EstimateSource
 }
 
 /** A pointer to a food plus enough identity to survive the food table changing. */
@@ -157,6 +225,8 @@ export type Composite = {
   retired?: boolean
   /** Prior definitions, so instances pinned to old versions still resolve. */
   history?: CompositeVersionRecord[]
+  /** Saved from an accepted AI estimate: logs at `ai_estimated` fidelity. */
+  estimateSource?: EstimateSource
 }
 
 export type CompositeInstance = {
@@ -200,6 +270,12 @@ export type Entry = {
   proxyFor?: { note: string }
   note?: string
   createdAt: number
+  /** AI-estimated entries: which tier and model produced the numbers. */
+  estimateSource?: EstimateSource
+  /** AI-estimated entries: where this line's numbers came from. */
+  lineSource?: LineSource
+  /** A plate photo attached to the entry, by id in the photo store. */
+  photoRef?: string
 }
 
 export type TrainingSession = {
@@ -327,6 +403,50 @@ export type Settings = {
   fatGPerKg: number
   occasionWindowMinutes: number
   barcodeLookupEnabled: boolean
+  /** Display and input units, per domain. Never stored on a record. */
+  units?: UnitPrefs
+  /** The floating add button on Today. On unless switched off. */
+  floatingAdd?: boolean
+  /** Search online, on explicit tap, when local search falls short. */
+  onlineSearchEnabled?: boolean
+  /** Keep plate photos attached to entries. On unless switched off. */
+  retainPhotos?: boolean
+  /** The on-device model downloaded, by WebLLM model id, if any. */
+  onDeviceModelId?: string
+}
+
+export type OnDeviceModelSize = '3b' | '1b'
+
+/**
+ * The optional external model endpoint. Off until configured: no default
+ * endpoint, no suggested provider, no shipped key. Kept in its own table so
+ * it never travels in a backup.
+ */
+export type ExternalEndpoint = {
+  id: 'external'
+  baseUrl: string
+  model: string
+  apiKey: string
+  enabled: boolean
+  /** When the user acknowledged what is sent. Shown before first use. */
+  disclosureAcceptedAt?: number
+}
+
+/** A plate photo, compressed on save, attached to one entry. */
+export type Photo = {
+  id: string
+  blob: Blob
+  createdAt: number
+}
+
+/**
+ * A network lookup that has been made, kept forever so it is never made
+ * again -- including the ones that found nothing.
+ */
+export type LookupRecord = {
+  key: string
+  at: number
+  found: boolean
 }
 
 /**

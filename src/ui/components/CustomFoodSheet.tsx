@@ -12,6 +12,12 @@
  *
  * Cloning ("close, but not quite") starts from a near match: the user edits
  * what they know, and provenance records the origin and which fields moved.
+ *
+ * A label can be read from a photo. The numbers come from the label by text
+ * recognition, never from a model, and every one is put in front of the
+ * user to confirm -- OCR misreads look plausible, so nothing is saved until
+ * Save is tapped. A partial read lands here with what was found filled in
+ * and the rest blank, which is the "enter only what you know" route.
  */
 
 import { useMemo, useState } from 'preact/hooks'
@@ -27,6 +33,8 @@ import { unknownNutrients } from '../../domain/composites/index.ts'
 import * as repo from '../../data/repositories.ts'
 import * as store from '../store.ts'
 import { Sheet, fmt, parseOptionalNumber } from './common.tsx'
+import { compressImage, pickImage } from '../../platform/image.ts'
+import { nutrientLabel } from '../../domain/nutrition/index.ts'
 
 type Mode = 'label' | 'recipe'
 
@@ -67,6 +75,8 @@ export function CustomFoodSheet(props: {
   initialName?: string
   /** "Close, but not quite": fork this food and adjust it. */
   cloneFrom?: FoodItem
+  /** Opened to read a label: lead with the photo. */
+  readLabel?: boolean
 }) {
   const origin = props.cloneFrom
   const [mode, setMode] = useState<Mode>('label')
@@ -82,6 +92,54 @@ export function CustomFoodSheet(props: {
   const [ingredients, setIngredients] = useState<Ingredient[]>([])
   const [yieldGrams, setYieldGrams] = useState('')
   const [query, setQuery] = useState('')
+  const [ocr, setOcr] = useState<
+    | { kind: 'reading'; progress: number }
+    | { kind: 'read'; found: NutrientKey[]; basis: string }
+    | { kind: 'failed'; message: string }
+    | undefined
+  >(undefined)
+
+  async function readFromPhoto(): Promise<void> {
+    const file = await pickImage()
+    if (!file) return
+    setOcr({ kind: 'reading', progress: 0 })
+    try {
+      // Larger than a plate photo: small type needs the pixels.
+      const image = await compressImage(file, 2000)
+      const { readLabel } = await import('../../food/labelOcr.ts')
+      const read = await readLabel(image, (p) => setOcr({ kind: 'reading', progress: p }))
+      if (read.found.length === 0) {
+        setOcr({
+          kind: 'failed',
+          message:
+            'No values could be read from that photo. Enter them by hand below — or try again flat, well lit and straight on.',
+        })
+        return
+      }
+      const next: Record<string, string> = { ...fields }
+      for (const k of read.found) {
+        const v = read.values[k]
+        if (v !== undefined) next[k] = String(Math.round(v * 10) / 10)
+      }
+      setFields(next)
+      if (read.basisGrams !== undefined) setBasis(String(read.basisGrams))
+      setOcr({
+        kind: 'read',
+        found: read.found,
+        basis:
+          read.basis === '100g'
+            ? 'per 100 g'
+            : read.basisGrams !== undefined
+              ? `per serving of ${fmt(read.basisGrams)} g`
+              : 'per serving — the serving size was not found, so check the grams below',
+      })
+    } catch {
+      setOcr({
+        kind: 'failed',
+        message: 'The label could not be read on this device. Enter the values by hand below.',
+      })
+    }
+  }
 
   const results = useMemo(
     () => (query.trim().length > 0 ? store.searchIndex.value.search(query, 8) : []),
@@ -124,6 +182,7 @@ export function CustomFoodSheet(props: {
       id: repo.newId('x'),
       name: name.trim(),
       tier: 'custom',
+      origin: 'custom',
       per100g: preview,
       portions:
         mode === 'label' && b > 0 && b !== 100
@@ -151,8 +210,7 @@ export function CustomFoodSheet(props: {
           }
         : {}),
     }
-    await repo.putFood(food)
-    await store.loadFoodIndex()
+    await store.saveLocalFood(food)
     store.notify(`"${food.name}" saved to your foods.`)
     props.onSaved(food)
   }
@@ -202,6 +260,34 @@ export function CustomFoodSheet(props: {
 
       {mode === 'label' ? (
         <>
+          {!origin && (
+            <div class="card" style="display:flex;flex-direction:column;gap:8px">
+              <button
+                class={`btn btn-wide${props.readLabel && !ocr ? ' btn-primary' : ''}`}
+                disabled={ocr?.kind === 'reading'}
+                onClick={() => void readFromPhoto()}
+              >
+                {ocr?.kind === 'reading'
+                  ? `Reading the label… ${Math.round(ocr.progress * 100)}%`
+                  : 'Read the label from a photo'}
+              </button>
+              {!ocr && (
+                <div class="faint">
+                  Works offline. Flat, well-lit, high-contrast panels read well;
+                  curved bottles, gloss and small type read poorly.
+                </div>
+              )}
+              {ocr?.kind === 'read' && (
+                <div class="notice">
+                  Read {ocr.found.length} values ({ocr.found.map((k) => nutrientLabel(k).toLowerCase()).join(', ')}),{' '}
+                  {ocr.basis}. Check every number against the label before saving —
+                  a lost decimal or an 8 read as 3 looks just as plausible. Anything
+                  not found is blank, stored as unknown.
+                </div>
+              )}
+              {ocr?.kind === 'failed' && <div class="notice">{ocr.message}</div>}
+            </div>
+          )}
           <label>
             The values below are for this many grams
             <input

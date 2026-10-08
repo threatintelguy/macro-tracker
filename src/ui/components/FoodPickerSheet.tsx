@@ -6,7 +6,8 @@
 import { useMemo, useState } from 'preact/hooks'
 import type { FoodItem } from '../../domain/types.ts'
 import * as store from '../store.ts'
-import { Sheet, fmt } from './common.tsx'
+import { Sheet } from './common.tsx'
+import { OnlineSearch, ResultRow } from './FoodSearch.tsx'
 
 export function FoodPickerSheet(props: {
   title: string
@@ -34,20 +35,10 @@ export function FoodPickerSheet(props: {
       <div class="list">
         {results.length === 0 && <div class="empty">Nothing matched.</div>}
         {results.map((r) => (
-          <button key={r.food.id} class="list-item" onClick={() => props.onPick(r.food)}>
-            <div style="flex:1;min-width:0">
-              <div class="title">{r.food.name}</div>
-              <div class="meta">
-                {fmt(r.food.per100g.kcal)} kcal · {fmt(r.food.per100g.protein, 1)} g
-                protein per 100 g
-              </div>
-            </div>
-            <span class="tier-tag" data-tier={r.food.tier}>
-              {r.food.tier}
-            </span>
-          </button>
+          <ResultRow key={r.food.id} result={r} onPick={props.onPick} />
         ))}
       </div>
+      <OnlineSearch query={query} onAccepted={props.onPick} />
     </Sheet>
   )
 }

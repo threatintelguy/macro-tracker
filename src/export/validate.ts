@@ -152,7 +152,18 @@ function record(value: V<number>): V<Record<string, number>> {
 
 const phase = lit('calibration', 'steady', 'recalibration')
 const precisionMode = lit('weighed', 'composite', 'minimal')
-const fidelity = lit('weighed', 'portioned', 'estimated', 'flagged')
+const fidelity = lit('weighed', 'portioned', 'estimated', 'flagged', 'ai_estimated')
+
+const isoTime: V<string> = (v, path, p) =>
+  typeof v === 'string' && v.length <= 40 && !Number.isNaN(Date.parse(v))
+    ? v
+    : fail(p, path, 'is not a timestamp')
+
+const estimateSource = obj({
+  tier: lit('on-device', 'external'),
+  model: str,
+  at: isoTime,
+})
 
 const nutrients: V<unknown> = (() => {
   const shape: Shape = {}
@@ -194,6 +205,9 @@ const entry = obj({
   'proxyFor?': obj({ note: str }),
   'note?': str,
   createdAt: num,
+  'estimateSource?': estimateSource,
+  'lineSource?': lit('db', 'model', 'prep'),
+  'photoRef?': id,
 })
 
 const day = obj({
@@ -225,13 +239,14 @@ const composite = obj({
   updatedAt: num,
   'retired?': bool,
   'history?': arr(obj({ version: int, components: arr(component), replacedAt: num })),
+  'estimateSource?': estimateSource,
 })
 
 const food = obj({
   id,
   name: str,
   'brand?': str,
-  tier: lit('curated', 'usda', 'custom', 'barcode'),
+  tier: lit('curated', 'usda', 'custom', 'barcode', 'online'),
   per100g: nutrients,
   portions: arr(obj({ label: str, grams: positive })),
   cookState: lit('raw', 'cooked', 'n/a'),
@@ -244,6 +259,13 @@ const food = obj({
     yieldGrams: positive,
   }),
   'derivedFrom?': obj({ ref: foodRef, adjustedFields: arr(str) }),
+  'origin?': lit('curated', 'usda-generic', 'usda-branded', 'barcode', 'online', 'custom'),
+  'estimate?': obj({
+    line: lit('model', 'prep'),
+    tier: lit('on-device', 'external'),
+    model: str,
+    at: isoTime,
+  }),
 })
 
 const targetKey = lit(
@@ -291,6 +313,16 @@ const settings = obj({
   fatGPerKg: nonNeg,
   occasionWindowMinutes: positive,
   barcodeLookupEnabled: bool,
+  'units?': obj({
+    bodyWeight: lit('lb', 'kg'),
+    food: lit('g', 'oz'),
+    height: lit('ftin', 'cm'),
+    waist: lit('in', 'cm'),
+  }),
+  'floatingAdd?': bool,
+  'onlineSearchEnabled?': bool,
+  'retainPhotos?': bool,
+  'onDeviceModelId?': str,
 })
 
 const goal = obj({

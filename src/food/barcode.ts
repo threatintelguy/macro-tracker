@@ -1,17 +1,23 @@
 /**
- * Tier 3: barcode lookup.
+ * Barcode lookup.
  *
  * What leaves the device: one product code, on an explicit user action.
  * Nothing else -- no identifier, no session, no cookie. Fetched with
  * `credentials: 'omit'` and no referrer. Results are written to the local
- * custom-food table and served from local storage forever after, so a given
- * product is fetched at most once ever.
+ * food table and served from local storage forever after.
+ *
+ * Scanning the same barcode twice must never hit the network twice. Local
+ * storage is checked first, then the bundled index (whose branded slice
+ * carries GTINs), then the record of lookups already made -- including the
+ * ones that found nothing, which are remembered too. `resolveBarcode` is
+ * that order, in one testable place.
  *
  * A global offline-mode switch hard-disables this module, falling back to
  * manual label entry.
  */
 
-import type { FoodItem, NutrientVector, Portion } from '../domain/types.ts'
+import type { FoodItem, LookupRecord, NutrientVector, Portion } from '../domain/types.ts'
+import { barcodeVariants } from './search.ts'
 
 const OFF_ENDPOINT = 'https://world.openfoodfacts.org/api/v2/product'
 
@@ -117,9 +123,75 @@ export async function lookupBarcode(
   return { ok: true, food }
 }
 
+/** The one key a product code is remembered under, whatever its spelling. */
+export function barcodeKey(code: string): string {
+  const digits = code.trim().replace(/\D/g, '').replace(/^0+/, '')
+  return `bc:${digits.padStart(14, '0')}`
+}
+
+export type BarcodeResolveDeps = {
+  /** A food already stored on this device under any spelling of the code. */
+  local: (variants: string[]) => Promise<FoodItem | undefined>
+  /** A food in the bundled index. */
+  bundled: (code: string) => FoodItem | undefined
+  /** A lookup already made, found or not. */
+  previous: (key: string) => Promise<LookupRecord | undefined>
+  remember: (record: LookupRecord) => Promise<void>
+  save: (food: FoodItem) => Promise<void>
+  lookup: (code: string) => Promise<BarcodeLookupResult>
+  now?: () => number
+}
+
+export type BarcodeResolution =
+  | { ok: true; food: FoodItem; from: 'local' | 'bundled' | 'network' }
+  | { ok: false; message: string; from: 'remembered' | 'network' | 'offline' }
+
+/**
+ * Resolve a code with at most one network request, ever. A definite answer
+ * from the service -- a product, or no product -- is kept forever; a
+ * transient failure (offline, unreachable) is not, so it can be retried.
+ */
+export async function resolveBarcode(
+  code: string,
+  deps: BarcodeResolveDeps,
+): Promise<BarcodeResolution> {
+  const variants = barcodeVariants(code)
+  const local = await deps.local(variants)
+  if (local) return { ok: true, food: local, from: 'local' }
+  const bundled = deps.bundled(code)
+  if (bundled) return { ok: true, food: bundled, from: 'bundled' }
+
+  const key = barcodeKey(code)
+  const previous = await deps.previous(key)
+  if (previous && !previous.found) {
+    return {
+      ok: false,
+      from: 'remembered',
+      message:
+        'This code was looked up before and had no usable product, so it is not looked up again. Enter the label values manually and it will be saved for next time.',
+    }
+  }
+
+  const result = await deps.lookup(code)
+  const at = deps.now?.() ?? Date.now()
+  if (result.ok) {
+    await deps.save(result.food)
+    await deps.remember({ key, at, found: true })
+    return { ok: true, food: result.food, from: 'network' }
+  }
+  if (result.reason === 'not-found' || result.reason === 'incomplete') {
+    await deps.remember({ key, at, found: false })
+  }
+  return {
+    ok: false,
+    from: result.reason === 'offline' ? 'offline' : 'network',
+    message: result.message,
+  }
+}
+
 type OffNutriments = Record<string, number | string | undefined>
 
-type OffProduct = {
+export type OffProduct = {
   product_name?: string
   brands?: string
   serving_size?: string
@@ -204,6 +276,7 @@ export function normaliseOffProduct(
     name,
     ...(brand ? { brand } : {}),
     tier: 'barcode',
+    origin: 'barcode',
     per100g,
     portions,
     cookState: 'n/a',

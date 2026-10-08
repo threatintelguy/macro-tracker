@@ -13,6 +13,8 @@ import type {
   CompositeTombstone,
   DayRecord,
   Entry,
+  ExternalEndpoint,
+  FoodItem,
   Goal,
   LocalDate,
   NutrientKey,
@@ -31,12 +33,14 @@ import { FoodSearchIndex } from '../food/search.ts'
 import { curatedFoods } from '../food/curated.ts'
 import { loadUsdaSubset } from '../food/usda.ts'
 import { registerFoods } from '../food/registry.ts'
+import { DEFAULT_UNIT_PREFS, type UnitPrefs } from '../domain/units.ts'
 import { defaultSettings } from '../data/db.ts'
 import * as repo from '../data/repositories.ts'
 import * as engine from '../data/engine.ts'
 import { setRegisteredFoods } from '../data/transfer.ts'
 import { addDays, today } from '../domain/dates.ts'
 import { calibrationProgress, type CalibrationProgress } from '../domain/phase/index.ts'
+import { makeLibraryMatcher } from '../estimate/pipeline.ts'
 
 export type Tab = 'today' | 'log' | 'trends' | 'settings'
 
@@ -65,11 +69,42 @@ export const usdaLoaded = signal(false)
 export const earliestDate = signal<LocalDate | undefined>(undefined)
 /** Items in the needs-detail queue. Shown as a quiet count, never a badge. */
 export const needsDetailCount = signal(0)
+/** The optional external model endpoint, when one is configured. */
+export const externalEndpoint = signal<ExternalEndpoint | undefined>(undefined)
 
 /** Ticks every minute so time-of-day ranking stays current. */
 export const clock = signal(Date.now())
 
 // --- Derived --------------------------------------------------------------
+
+/** Display and input units. A lens on stored values; never stored on a record. */
+export const units = computed<UnitPrefs>(() => ({
+  ...DEFAULT_UNIT_PREFS,
+  ...settings.value.units,
+}))
+
+/** Offline mode: every outbound call is hard-disabled. */
+export const offline = computed(() => profile.value?.offlineMode === true)
+
+/** Online food search is reachable: switched on, and not in offline mode. */
+export const onlineSearchAllowed = computed(
+  () => !offline.value && settings.value.onlineSearchEnabled !== false,
+)
+
+/**
+ * The external endpoint is usable for a request right now: configured,
+ * enabled, and not in offline mode. Photo capture is absent without it.
+ */
+export const externalReady = computed(() => {
+  const e = externalEndpoint.value
+  return (
+    !offline.value &&
+    e !== undefined &&
+    e.enabled &&
+    e.baseUrl.trim().length > 0 &&
+    e.model.trim().length > 0
+  )
+})
 
 export const rollup = computed<DayRollup | undefined>(() => {
   const d = day.value
@@ -166,9 +201,10 @@ export type SevenDay = {
 }
 
 /**
- * 7-day rolling averages, which are the headline figures everywhere. Each
- * nutrient averages only the days where it is complete -- a floor averaged
- * in as a total would be a confident low number.
+ * 7-day rolling averages: a quiet secondary line under each of today's
+ * figures, and the basis of Trends. Each nutrient averages only the days
+ * where it is complete -- a floor averaged in as a total would be a
+ * confident low number.
  */
 export const sevenDay = computed<SevenDay | undefined>(() => {
   const window = recentRollups.value.filter(
@@ -187,13 +223,19 @@ export const isToday = computed(() => selectedDate.value === today())
 
 // --- Loading --------------------------------------------------------------
 
+let usdaFoods: Promise<FoodItem[]> | undefined
+
 export async function loadFoodIndex(): Promise<void> {
   const index = new FoodSearchIndex()
   index.add(curatedFoods())
-  // Custom foods and cached barcode results, which live only on this device.
+  // Custom foods, cached barcode results and accepted online results, which
+  // live only on this device.
   const stored = await repo.getAllFoods()
-  const local = stored.filter((f) => f.tier === 'custom' || f.tier === 'barcode')
+  const local = stored.filter(
+    (f) => f.tier === 'custom' || f.tier === 'barcode' || f.tier === 'online',
+  )
   index.add(local)
+  index.setUsage(await repo.foodUsage())
   // Everything searchable must also be resolvable by id, or a composite
   // built from it resolves to nothing.
   registerFoods(local)
@@ -201,9 +243,11 @@ export async function loadFoodIndex(): Promise<void> {
   foodIndexVersion.value++
   setRegisteredFoods(() => searchIndex.value.all())
 
-  // Tier 2 loads in the background: it is optional, and search works without
-  // it. No core path awaits it.
-  void loadUsdaSubset().then((foods) => {
+  // The bundled index loads in the background: it is optional, and search
+  // works without it. No core path awaits it. Decoded once per session --
+  // a rebuild after an import reuses it.
+  usdaFoods ??= loadUsdaSubset()
+  void usdaFoods.then((foods) => {
     if (foods.length === 0) return
     index.add(foods)
     registerFoods(foods)
@@ -255,7 +299,30 @@ export async function refreshHistory(): Promise<void> {
   weightReadings.value = readings
   adjustments.value = adj
   tdeeEstimates.value = tdee
-  needsDetailCount.value = pending
+  needsDetailCount.value = pending + (await reresolvable()).length
+}
+
+/**
+ * Model-valued estimate lines whose food the library now has. Offered in the
+ * needs-detail list, never applied automatically: history stays as logged.
+ */
+export async function reresolvable(): Promise<{ entry: Entry; food: FoodItem }[]> {
+  const lines = await repo.modelLineEntries()
+  if (lines.length === 0) return []
+  const match = makeLibraryMatcher(searchIndex.value)
+  const out: { entry: Entry; food: FoodItem }[] = []
+  for (const entry of lines) {
+    const name = estimateLineName(entry)
+    const food = match(name)
+    if (food) out.push({ entry, food })
+  }
+  return out
+}
+
+/** The component name an estimated line was logged under, without the marker. */
+export function estimateLineName(e: Entry): string {
+  const name = e.source.kind === 'food' ? e.source.name : (e.componentRef?.name ?? e.source.name)
+  return name.replace(/\s*\(estimate\)$/, '')
 }
 
 export async function refreshComposites(): Promise<void> {
@@ -284,6 +351,7 @@ export async function afterEdit(dates: readonly LocalDate[]): Promise<void> {
   await engine.recomputeAfterEdit(dates)
   await refreshDay()
   await refreshHistory()
+  await refreshFoodUsage()
 }
 
 let lastEngineDay: LocalDate | undefined
@@ -298,6 +366,7 @@ async function runEngineOncePerDay(): Promise<void> {
 export async function boot(): Promise<void> {
   repo.setDayFactory(newDayRecord)
   await loadFoodIndex()
+  await refreshExternalEndpoint()
   settings.value = await repo.getSettings()
   profile.value = await repo.getProfile()
   goal.value = await repo.getActiveGoal()
@@ -311,6 +380,28 @@ export async function boot(): Promise<void> {
       void runEngineOncePerDay().then(refreshHistory)
     }
   }, 60_000)
+}
+
+/**
+ * Write a food to the local library and make it searchable at once, without
+ * rebuilding the index -- with the bundled tier loaded that is tens of
+ * thousands of rows. Every accepted online or barcode result goes through
+ * here, which is what makes it local search's forever after.
+ */
+export async function saveLocalFood(food: FoodItem): Promise<void> {
+  await repo.putFood(food)
+  searchIndex.value.replace(food)
+  foodIndexVersion.value++
+}
+
+/** Refresh the "previously logged" signal that ranks search. */
+export async function refreshFoodUsage(): Promise<void> {
+  searchIndex.value.setUsage(await repo.foodUsage())
+  foodIndexVersion.value++
+}
+
+export async function refreshExternalEndpoint(): Promise<void> {
+  externalEndpoint.value = await repo.getExternalEndpoint()
 }
 
 // --- Day navigation -------------------------------------------------------

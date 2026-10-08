@@ -16,12 +16,16 @@ import type {
   DayRecord,
   Entry,
   EntryId,
+  EstimateSource,
+  ExternalEndpoint,
   Fidelity,
   FoodId,
   FoodItem,
   FoodRef,
   Goal,
+  LineSource,
   LocalDate,
+  LookupRecord,
   NutrientKey,
   NutrientVector,
   Override,
@@ -49,6 +53,8 @@ import {
 } from '../domain/editing.ts'
 import { addDays, today } from '../domain/dates.ts'
 import { registerFoods, resolveFood, unregisterFood } from '../food/registry.ts'
+import { barcodeVariants, type FoodUsage } from '../food/search.ts'
+import { nutrientsForGrams } from '../domain/nutrition/index.ts'
 import type { WeightReading } from '../domain/engine/weightTrend.ts'
 
 export function newId(prefix = 'e'): string {
@@ -317,6 +323,9 @@ export type NewEntryInput = {
   note?: string
   fromCompositeEntryId?: EntryId
   proxyFor?: { note: string }
+  estimateSource?: EstimateSource
+  lineSource?: LineSource
+  photoRef?: string
 }
 
 export async function addEntry(input: NewEntryInput): Promise<Entry> {
@@ -384,6 +393,7 @@ export async function deleteEntry(id: EntryId): Promise<void> {
     }
   })
   invalidateRollup(existing.date)
+  if (existing.photoRef) await deletePhotoIfUnused(existing.photoRef)
 }
 
 /** Every row produced by one composite log: the root and its children. */
@@ -508,6 +518,8 @@ export async function editCompositeOverrides(
     ...(root.at !== undefined ? { at: root.at } : {}),
     ...(root.occasion !== undefined ? { occasion: root.occasion } : {}),
     createdAt: root.createdAt,
+    ...(root.estimateSource ? { estimateSource: root.estimateSource } : {}),
+    ...(root.photoRef ? { photoRef: root.photoRef } : {}),
   })
   await db.transaction('rw', db.entries, db.days, async () => {
     const oldIds = rows.map((r) => r.id)
@@ -576,10 +588,43 @@ export async function putFoods(foods: FoodItem[]): Promise<void> {
   registerFoods(foods)
 }
 
+/** A stored food under any spelling of the code (UPC-A, EAN-13, GTIN-14). */
 export async function findFoodByBarcode(
   barcode: string,
 ): Promise<FoodItem | undefined> {
-  return db.foods.where('barcode').equals(barcode).first()
+  const variants = barcodeVariants(barcode)
+  if (variants.length === 0) return undefined
+  return db.foods.where('barcode').anyOf(variants).first()
+}
+
+/** A network lookup already made, found or not. */
+export async function getLookup(key: string): Promise<LookupRecord | undefined> {
+  return db.lookups.get(key)
+}
+
+export async function putLookup(record: LookupRecord): Promise<void> {
+  await db.lookups.put(record)
+}
+
+/**
+ * How often and how recently each food has been logged -- including as a
+ * component of a composite meal. Feeds the "previously logged" rank.
+ */
+export async function foodUsage(): Promise<FoodUsage> {
+  const usage: FoodUsage = new Map()
+  const bump = (id: FoodId, at: number): void => {
+    if (!id) return
+    const u = usage.get(id)
+    if (u) {
+      u.count++
+      if (at > u.lastAt) u.lastAt = at
+    } else usage.set(id, { count: 1, lastAt: at })
+  }
+  await db.entries.each((e) => {
+    if (e.source.kind === 'food') bump(e.source.foodId, e.createdAt)
+    else if (e.componentRef) bump(e.componentRef.foodId, e.createdAt)
+  })
+  return usage
 }
 
 export async function deleteFood(id: FoodId): Promise<void> {
@@ -772,11 +817,21 @@ export async function logCompositeInstance(input: {
   date: LocalDate
   at?: string
   occasion?: string
-  /** Defaults to weighed; a meal built from estimated parts is `estimated`. */
+  /**
+   * Defaults to weighed; a meal built from estimated parts is `estimated`,
+   * and a composite saved from an AI estimate is `ai_estimated`.
+   */
   fidelity?: Fidelity
+  /** An AI estimate's provenance, stamped on every row. */
+  estimateSource?: EstimateSource
+  /** A plate photo, attached to the meal's root row. */
+  photoRef?: string
 }): Promise<{ entries: Entry[]; problems: string[] }> {
   const lookups = await makeLookups()
-  const resolved = resolveCompositeInstance(input.instance, lookups, input.fidelity)
+  const definition = lookups.composite(input.instance.compositeId)
+  const estimateSource = input.estimateSource ?? definition?.estimateSource
+  const fidelity = input.fidelity ?? (estimateSource ? 'ai_estimated' : undefined)
+  const resolved = resolveCompositeInstance(input.instance, lookups, fidelity)
 
   // A row whose food cannot be resolved would be written at zero nutrients,
   // which is silently wrong data in a table that is never recomputed. Refuse
@@ -800,6 +855,8 @@ export async function logCompositeInstance(input: {
     ...(input.at !== undefined ? { at: input.at } : {}),
     ...(input.occasion !== undefined ? { occasion: input.occasion } : {}),
     createdAt: now,
+    ...(estimateSource ? { estimateSource } : {}),
+    ...(input.photoRef ? { photoRef: input.photoRef } : {}),
   })
 
   await getOrCreateDay(input.date)
@@ -830,9 +887,15 @@ function resolvedRowsToEntries(input: {
   at?: string
   occasion?: string
   createdAt: number
+  estimateSource?: EstimateSource
+  photoRef?: string
 }): Entry[] {
   return input.rows.map((row, i) => ({
     id: i === 0 ? input.rootId : newId('e'),
+    ...(input.estimateSource
+      ? { estimateSource: input.estimateSource, lineSource: lineSourceOf(row.foodId) }
+      : {}),
+    ...(i === 0 && input.photoRef ? { photoRef: input.photoRef } : {}),
     date: input.date,
     ...(input.at !== undefined ? { at: input.at } : {}),
     ...(input.occasion !== undefined ? { occasion: input.occasion } : {}),
@@ -848,6 +911,11 @@ function resolvedRowsToEntries(input: {
       : { fromCompositeEntryId: input.rootId }),
     createdAt: input.createdAt + i,
   }))
+}
+
+/** Where an estimated row's numbers came from, read off its food. */
+function lineSourceOf(foodId: FoodId): LineSource {
+  return resolveFood(foodId)?.estimate?.line ?? 'db'
 }
 
 // --- Needs detail ---------------------------------------------------------
@@ -897,7 +965,7 @@ export async function resolveEntryDetail(
 
   if (options.updateFood && entry.source.kind === 'food' && entry.grams > 0) {
     const food = await db.foods.get(entry.source.foodId)
-    if (food && (food.tier === 'custom' || food.tier === 'barcode')) {
+    if (food && (food.tier === 'custom' || food.tier === 'barcode' || food.tier === 'online')) {
       const per100g = fillUnknownPer100g(food.per100g, values, entry.grams)
       await putFood({ ...food, per100g })
       const siblings = await db.entries.toArray()
@@ -921,6 +989,39 @@ export async function resolveEntryDetail(
   return [...touched]
 }
 
+/**
+ * Lines of accepted estimates whose numbers came from the model. When the
+ * library later gains the food, the needs-detail list offers to re-resolve
+ * them -- optional, never automatic: silently changing a past day would
+ * break the rule that history stays as logged.
+ */
+export async function modelLineEntries(): Promise<Entry[]> {
+  return db.entries.filter((e) => e.lineSource === 'model').toArray()
+}
+
+/**
+ * Re-resolve one model-valued line against a library food: database values
+ * for the same grams, and the line's source becomes `db`. The entry stays
+ * `ai_estimated` -- the amount is still an estimate.
+ */
+export async function reresolveEstimatedLine(
+  id: EntryId,
+  food: FoodItem,
+): Promise<LocalDate[]> {
+  const entry = await db.entries.get(id)
+  if (!entry || entry.lineSource !== 'model') return []
+  const ref: FoodRef = { kind: 'food', foodId: food.id, name: food.name }
+  const next: Entry = {
+    ...entry,
+    nutrients: nutrientsForGrams(food.per100g, entry.grams),
+    lineSource: 'db',
+    ...(entry.source.kind === 'food' ? { source: ref } : { componentRef: ref }),
+  }
+  await db.entries.put(next)
+  invalidateRollup(entry.date)
+  return [entry.date]
+}
+
 /** Keep a stand-in as it is and take it out of the queue. */
 export async function clearProxy(id: EntryId): Promise<LocalDate[]> {
   const entry = await db.entries.get(id)
@@ -929,6 +1030,67 @@ export async function clearProxy(id: EntryId): Promise<LocalDate[]> {
   await db.entries.put(rest)
   invalidateRollup(entry.date)
   return [entry.date]
+}
+
+// --- Photos ---------------------------------------------------------------
+//
+// Plate photos stay on the device. They are attached to an entry, are
+// deletable one at a time or all at once, and are not part of an export.
+
+export async function putPhoto(blob: Blob): Promise<string> {
+  const id = newId('p')
+  await db.photos.put({ id, blob, createdAt: Date.now() })
+  return id
+}
+
+export async function getPhoto(id: string): Promise<Blob | undefined> {
+  return (await db.photos.get(id))?.blob
+}
+
+/** Delete one photo and every reference to it. */
+export async function deletePhoto(id: string): Promise<void> {
+  const refs = await db.entries.filter((e) => e.photoRef === id).toArray()
+  await db.transaction('rw', db.entries, db.photos, async () => {
+    await db.photos.delete(id)
+    await db.entries.bulkPut(refs.map(({ photoRef: _p, ...rest }) => rest))
+  })
+}
+
+async function deletePhotoIfUnused(id: string): Promise<void> {
+  const still = await db.entries.filter((e) => e.photoRef === id).count()
+  if (still === 0) await db.photos.delete(id)
+}
+
+/** Delete every stored photo, for the global retention switch. */
+export async function deleteAllPhotos(): Promise<number> {
+  const n = await db.photos.count()
+  const refs = await db.entries.filter((e) => e.photoRef !== undefined).toArray()
+  await db.transaction('rw', db.entries, db.photos, async () => {
+    await db.photos.clear()
+    await db.entries.bulkPut(refs.map(({ photoRef: _p, ...rest }) => rest))
+  })
+  return n
+}
+
+export async function photoCount(): Promise<number> {
+  return db.photos.count()
+}
+
+// --- External endpoint ----------------------------------------------------
+//
+// The key lives in IndexedDB, not a hardware-backed keystore, and it never
+// travels in a backup.
+
+export async function getExternalEndpoint(): Promise<ExternalEndpoint | undefined> {
+  return db.secrets.get('external')
+}
+
+export async function saveExternalEndpoint(e: ExternalEndpoint): Promise<void> {
+  await db.secrets.put(e)
+}
+
+export async function clearExternalEndpoint(): Promise<void> {
+  await db.secrets.delete('external')
 }
 
 // --- Weight ---------------------------------------------------------------
@@ -944,6 +1106,19 @@ export async function setWeight(
     weightKg: time !== undefined ? { value: kg, time } : { value: kg },
   })
   invalidateRollup(date)
+}
+
+/** Waist circumference for a day, in centimetres whatever unit it was typed in. */
+export async function setWaist(date: LocalDate, cm: number): Promise<void> {
+  const day = await getOrCreateDay(date)
+  await db.days.put({ ...day, waistCm: cm })
+  invalidateRollup(date)
+}
+
+/** The most recent waist reading, for the waist-to-height reference. */
+export async function latestWaistCm(): Promise<number | undefined> {
+  const days = await db.days.orderBy('date').reverse().toArray()
+  return days.find((d) => d.waistCm !== undefined)?.waistCm
 }
 
 export async function getWeightReadings(
