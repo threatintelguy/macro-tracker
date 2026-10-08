@@ -17,18 +17,29 @@ import {
 import { CALIBRATION_DAYS } from '../../domain/phase/index.ts'
 import { addDays, today } from '../../domain/dates.ts'
 import { capabilities } from '../../platform/index.ts'
-import { fmt } from '../components/common.tsx'
+import { BodyWeight, fmt } from '../components/common.tsx'
+import {
+  formatHeight,
+  parseBodyWeight,
+  parseLength,
+  type BodyWeightUnit,
+  type HeightUnit,
+} from '../../domain/units.ts'
 
 export function Onboarding() {
   const [step, setStep] = useState(0)
   const [sex, setSex] = useState<Sex>('male')
   const [birthYear, setBirthYear] = useState('')
-  const [heightCm, setHeightCm] = useState('')
-  const [weightKg, setWeightKg] = useState('')
+  const [height, setHeight] = useState('')
+  const [weight, setWeight] = useState('')
+  const [weightUnit, setWeightUnit] = useState<BodyWeightUnit>(store.units.value.bodyWeight)
+  const [heightUnit, setHeightUnit] = useState<HeightUnit>(store.units.value.height)
   const [activityLevel, setActivityLevel] = useState<ActivityLevel>('moderate')
 
-  const profileValid =
-    Number(birthYear) > 1900 && Number(heightCm) > 50 && Number(weightKg) > 20
+  // Typed in either unit; stored in kilograms and centimetres.
+  const heightCm = parseLength(height, heightUnit) ?? 0
+  const weightKg = parseBodyWeight(weight, weightUnit) ?? 0
+  const profileValid = Number(birthYear) > 1900 && heightCm > 50 && weightKg > 20
 
   async function finish(): Promise<void> {
     const start = today()
@@ -36,7 +47,7 @@ export function Onboarding() {
       id: 'profile',
       sex,
       birthYear: Number(birthYear),
-      heightCm: Number(heightCm),
+      heightCm,
       activityLevel,
       startDate: start,
       // Calibration is where the composite library gets built, so it is the
@@ -49,8 +60,13 @@ export function Onboarding() {
       offlineMode: false,
       theme: 'dark',
     })
+    const settings = await repo.getSettings()
+    await repo.saveSettings({
+      ...settings,
+      units: { ...store.units.value, bodyWeight: weightUnit, height: heightUnit },
+    })
     await repo.ensureDay(start, 'calibration', 'weighed')
-    await repo.setWeight(start, Number(weightKg))
+    await repo.setWeight(start, weightKg)
     // Installed PWAs are generally granted persistence, which exempts the
     // origin from routine eviction.
     void capabilities.requestPersistentStorage()
@@ -127,28 +143,47 @@ export function Onboarding() {
               />
             </label>
             <label>
-              Height (cm)
+              Height ({heightUnit === 'cm' ? 'cm' : 'ft/in'})
               <input
-                type="number"
-                inputMode="decimal"
-                placeholder="180.0"
-                value={heightCm}
-                onInput={(e) => setHeightCm((e.target as HTMLInputElement).value)}
+                type="text"
+                inputMode={heightUnit === 'cm' ? 'decimal' : 'text'}
+                placeholder={heightUnit === 'cm' ? '180' : `5'11"`}
+                value={height}
+                onInput={(e) => setHeight((e.target as HTMLInputElement).value)}
               />
             </label>
           </div>
+          <div class="chip-row">
+            {(['ftin', 'cm'] as const).map((u) => (
+              <button key={u} class="chip" aria-pressed={heightUnit === u} onClick={() => setHeightUnit(u)}>
+                {u === 'cm' ? 'cm' : 'ft/in'}
+              </button>
+            ))}
+            {heightCm > 0 && <span class="faint">{formatHeight(heightCm, heightUnit === 'cm' ? 'ftin' : 'cm')}</span>}
+          </div>
 
           <label>
-            Weight today (kg)
+            Weight today ({weightUnit})
             <input
-              type="number"
+              type="text"
               inputMode="decimal"
-              step="0.1"
-              placeholder="85.0"
-              value={weightKg}
-              onInput={(e) => setWeightKg((e.target as HTMLInputElement).value)}
+              placeholder={weightUnit === 'lb' ? '187' : '85.0'}
+              value={weight}
+              onInput={(e) => setWeight((e.target as HTMLInputElement).value)}
             />
           </label>
+          <div class="chip-row">
+            {(['lb', 'kg'] as const).map((u) => (
+              <button key={u} class="chip" aria-pressed={weightUnit === u} onClick={() => setWeightUnit(u)}>
+                {u}
+              </button>
+            ))}
+            {weightKg > 0 && (
+              <span class="faint">
+                <BodyWeight kg={weightKg} unit={weightUnit} />
+              </span>
+            )}
+          </div>
 
           <label>
             Activity
@@ -172,8 +207,8 @@ export function Onboarding() {
             <div class="faint">
               Starting maintenance estimate will be near{' '}
               {fmt(
-                (10 * Number(weightKg) +
-                  6.25 * Number(heightCm) -
+                (10 * weightKg +
+                  6.25 * heightCm -
                   5 * (new Date().getFullYear() - Number(birthYear)) +
                   (sex === 'male' ? 5 : -161)) *
                   ACTIVITY_MULTIPLIERS[activityLevel],

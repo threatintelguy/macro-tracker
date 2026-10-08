@@ -8,10 +8,15 @@
  * A convenience, never a nag: no badge escalation, no notification, no
  * warning colour. An item that sits here for a year is a legitimate
  * outcome -- the day it belongs to is still logged, which was the point.
+ *
+ * It also offers to re-resolve a line of an accepted estimate whose numbers
+ * came from the model, once the library has that food. Optional and never
+ * automatic: silently changing a past day would break the rule that history
+ * stays as logged.
  */
 
 import { useEffect, useState } from 'preact/hooks'
-import type { Entry, NutrientKey } from '../../domain/types.ts'
+import type { Entry, FoodItem, NutrientKey } from '../../domain/types.ts'
 import { NUTRIENT_KEYS } from '../../domain/types.ts'
 import { nutrientLabel, nutrientUnit } from '../../domain/nutrition/index.ts'
 import { formatDisplayDate } from '../../domain/dates.ts'
@@ -22,11 +27,23 @@ import { FoodPickerSheet } from './FoodPickerSheet.tsx'
 
 export function NeedsDetailSheet(props: { onClose: () => void }) {
   const [items, setItems] = useState<Entry[] | undefined>(undefined)
+  const [lines, setLines] = useState<{ entry: Entry; food: FoodItem }[]>([])
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set())
   const [open, setOpen] = useState<string | undefined>(undefined)
 
   async function load(): Promise<void> {
     setItems(await repo.needsDetailEntries())
+    setLines(await store.reresolvable())
   }
+
+  async function useLibrary(entry: Entry, food: FoodItem): Promise<void> {
+    const dates = await repo.reresolveEstimatedLine(entry.id, food)
+    await store.afterEdit(dates)
+    store.notify(`${formatDisplayDate(entry.date)} now uses ${food.name}.`)
+    await load()
+  }
+
+  const offered = lines.filter((l) => !dismissed.has(l.entry.id))
 
   useEffect(() => {
     void load()
@@ -39,8 +56,43 @@ export function NeedsDetailSheet(props: { onClose: () => void }) {
         stand-in. Fill them in if the details turn up; leaving them is fine.
       </div>
       {items === undefined && <div class="faint">Loading…</div>}
-      {items !== undefined && items.length === 0 && (
+      {items !== undefined && items.length === 0 && offered.length === 0 && (
         <Empty>Nothing waiting for detail.</Empty>
+      )}
+      {offered.length > 0 && (
+        <div>
+          <div class="card-title">Now in your library</div>
+          <div class="faint" style="margin-bottom:8px">
+            These parts of estimated meals were priced by the model. Your
+            library has them now; use its values if they fit. The amount stays
+            as estimated.
+          </div>
+          <div class="list">
+            {offered.map(({ entry, food }) => (
+              <div key={entry.id} class="list-item" style="flex-direction:column;align-items:stretch;gap:6px">
+                <div>
+                  <div class="title">{store.estimateLineName(entry)}</div>
+                  <div class="meta">
+                    {formatDisplayDate(entry.date)} · {fmt(entry.grams)} g ·{' '}
+                    {fmt(entry.nutrients.kcal)} kcal now, {fmt((food.per100g.kcal ?? 0) * entry.grams / 100)} kcal
+                    from {food.name}
+                  </div>
+                </div>
+                <div class="row" style="gap:8px">
+                  <button class="btn btn-small" onClick={() => void useLibrary(entry, food)}>
+                    Use library values
+                  </button>
+                  <button
+                    class="btn btn-small btn-ghost"
+                    onClick={() => setDismissed((d) => new Set(d).add(entry.id))}
+                  >
+                    Not this
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
       <div class="list">
         {items?.map((e) => (

@@ -26,6 +26,8 @@ import * as repo from '../../data/repositories.ts'
 import { formatTime } from '../../domain/dates.ts'
 import { AggregateText, Sheet, fmt } from './common.tsx'
 import { BarcodeSheet } from './BarcodeSheet.tsx'
+import { OnlineSearch, ResultRow } from './FoodSearch.tsx'
+import { formatFood, parseFoodAmount } from '../../domain/units.ts'
 import { CustomFoodSheet } from './CustomFoodSheet.tsx'
 
 export type DraftComponent = {
@@ -75,15 +77,19 @@ export function WeighFlow(props: {
     [draft],
   )
   const totalGrams = draft.reduce((a, d) => a + d.grams, 0)
+  const units = store.units.value
+  // The kitchen scale may read grams or ounces; either is accepted, and a
+  // suffix overrides the preference. Stored as grams.
+  const parsedGrams = parseFoodAmount(grams, units.food)
 
   const pendingNutrients =
-    picked && Number(grams) > 0
-      ? nutrientsForGrams(picked.per100g, Number(grams))
+    picked && parsedGrams !== undefined
+      ? nutrientsForGrams(picked.per100g, parsedGrams)
       : ZERO_NUTRIENTS
 
   function addComponent(): void {
-    const g = Number(grams)
-    if (!picked || !Number.isFinite(g) || g <= 0) return
+    const g = parsedGrams
+    if (!picked || g === undefined) return
     setDraft((d) => [
       ...d,
       {
@@ -102,7 +108,7 @@ export function WeighFlow(props: {
   }
 
   function usePortion(portionGrams: number): void {
-    setGrams(String(portionGrams))
+    setGrams(`${portionGrams} g`)
     setFidelity('portioned')
   }
 
@@ -194,8 +200,8 @@ export function WeighFlow(props: {
             <span>{draft.length}</span>
           </div>
           <div class="n">
-            <span>Grams</span>
-            <span>{fmt(totalGrams)}</span>
+            <span>Amount</span>
+            <span>{formatFood(totalGrams, units.food)}</span>
           </div>
           <div class="n">
             <span>kcal</span>
@@ -217,7 +223,7 @@ export function WeighFlow(props: {
                   {d.food.name}
                 </div>
                 <div class="meta">
-                  {fmt(d.grams)} g · {fmt(d.nutrients.kcal)} kcal ·{' '}
+                  {formatFood(d.grams, units.food)} · {fmt(d.nutrients.kcal)} kcal ·{' '}
                   {fmt(d.nutrients.protein, 1)} g protein
                 </div>
               </div>
@@ -256,13 +262,11 @@ export function WeighFlow(props: {
           </div>
 
           <label>
-            Grams
+            Amount ({units.food === 'oz' ? 'oz, or add g' : 'g, or add oz'})
             <input
               ref={gramsRef}
-              type="number"
+              type="text"
               inputMode="decimal"
-              min="0"
-              step="1"
               value={grams}
               placeholder="0"
               onInput={(e) => {
@@ -289,8 +293,9 @@ export function WeighFlow(props: {
             </div>
           )}
 
-          {Number(grams) > 0 && (
+          {parsedGrams !== undefined && (
             <div class="faint">
+              {units.food === 'oz' ? `${fmt(parsedGrams)} g · ` : ''}
               {fmt(pendingNutrients.kcal)} kcal · {fmt(pendingNutrients.protein, 1)} g
               protein · {fmt(pendingNutrients.carbs, 1)} g carbs ·{' '}
               {fmt(pendingNutrients.fat, 1)} g fat
@@ -300,7 +305,7 @@ export function WeighFlow(props: {
 
           <button
             class="btn btn-primary btn-wide"
-            disabled={!(Number(grams) > 0)}
+            disabled={parsedGrams === undefined}
             onClick={addComponent}
           >
             Add to meal
@@ -332,25 +337,10 @@ export function WeighFlow(props: {
               </div>
             )}
             {results.map((r) => (
-              <button
-                key={r.food.id}
-                class="list-item"
-                onClick={() => setPicked(r.food)}
-              >
-                <div style="flex:1;min-width:0">
-                  <div class="title">{r.food.name}</div>
-                  <div class="meta">
-                    {fmt(r.food.per100g.kcal)} kcal ·{' '}
-                    {fmt(r.food.per100g.protein, 1)} g protein per 100 g
-                    {r.food.cookState !== 'n/a' && ` · ${r.food.cookState}`}
-                  </div>
-                </div>
-                <span class="tier-tag" data-tier={r.food.tier}>
-                  {r.food.tier}
-                </span>
-              </button>
+              <ResultRow key={r.food.id} result={r} onPick={setPicked} />
             ))}
           </div>
+          <OnlineSearch query={query} onAccepted={setPicked} />
         </>
       )}
 

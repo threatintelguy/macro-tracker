@@ -8,6 +8,7 @@ import {
   TARGET_UNITS,
   sourceLabel,
 } from '../../domain/engine/targets.ts'
+import { bodyWeightParts, type BodyWeightUnit } from '../../domain/units.ts'
 
 /**
  * A dismissible sheet. Never a modal dialog for data entry -- it preserves
@@ -260,4 +261,40 @@ export function parseOptionalNumber(raw: string | undefined): number | null {
   if (t === '') return null
   const n = Number(t)
   return Number.isFinite(n) && n >= 0 ? n : null
+}
+
+/**
+ * Body weight in both units, preferred first and larger: "204.2 lb (92.6 kg)".
+ * The engine's arithmetic is metric, so showing both keeps the displayed and
+ * the computed numbers legible as the same thing.
+ */
+export function BodyWeight(props: { kg: number; dp?: number; unit: BodyWeightUnit }) {
+  const { primary, secondary } = bodyWeightParts(props.kg, props.unit, props.dp ?? 1)
+  return (
+    <span class="dual-weight">
+      {primary}
+      <span class="dual-secondary"> ({secondary})</span>
+    </span>
+  )
+}
+
+/** "7-day avg 168 g": the quiet secondary line under each of today's figures. */
+export function AverageLine(props: {
+  today?: Aggregate
+  mean?: { value: number; days: number }
+  unit: string
+  dp?: number
+}) {
+  const dp = props.dp ?? 0
+  if (!props.mean) return null
+  const todayText =
+    props.today && props.today.knownEntries > 0
+      ? `${props.today.complete ? '' : 'at least '}${fmt(props.today.value, dp)} ${props.unit} today · `
+      : ''
+  return (
+    <span class="sub avg-line">
+      {todayText}
+      {fmt(props.mean.value, dp)} {props.unit} avg
+    </span>
+  )
 }

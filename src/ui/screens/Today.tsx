@@ -1,12 +1,20 @@
 /**
  * Today -- and, through the date header, any past day.
  *
+ * Today shows today. Every headline figure is the day's own value against
+ * its band, with the 7-day average as a small, quiet secondary line; the
+ * averages proper live in Trends. The treatment is unchanged: bands rather
+ * than thresholds, colour encoding distance rather than virtue, never red
+ * on an intake value, and no language of over or under.
+ *
  * Priority order, following the guidance:
- *   1. Protein — the day against target, plus the 7-day average. Largest.
- *   2. Calories — the day against target, plus the 7-day average.
- *   3. Weight trend — the trend value, not the day's reading.
+ *   0. The add control -- between calibration and protein, where it cannot
+ *      scroll out of view, plus a floating button that persists.
+ *   1. Protein — the day against target. Largest.
+ *   2. Calories — the day against target.
+ *   3. Weight trend — the trend value, not the day's reading, in both units.
  *   4. Carbs and fat — compact, secondary.
- *   5. Fibre and saturated fat — 7-day averages against their bands.
+ *   5. Fibre and saturated fat — the day against their bands.
  *
  * A past day is fully editable -- add, edit, delete, weight, note -- and
  * renders in the phase and precision mode it was actually logged under. A
@@ -16,6 +24,16 @@
 
 import { useRef, useState } from 'preact/hooks'
 import type { Entry, TargetKey } from '../../domain/types.ts'
+import { ESTIMATED_FIDELITIES } from '../../domain/types.ts'
+import {
+  bodyWeightInputValue,
+  formatFood,
+  parseBodyWeight,
+  parseLength,
+  waistInputValue,
+  BODY_WEIGHT_LABEL,
+  WAIST_LABEL,
+} from '../../domain/units.ts'
 import * as store from '../store.ts'
 import * as repo from '../../data/repositories.ts'
 import {
@@ -25,13 +43,16 @@ import {
 import {
   occasionsClearingProtein,
   fidelityLabel,
+  lowestFidelity,
 } from '../../domain/analytics/index.ts'
 import { perOccasionProteinTarget } from '../../domain/nutrition/index.ts'
 import { formatDisplayDate, today } from '../../domain/dates.ts'
 import { phaseLabel, precisionModeLabel } from '../../domain/phase/index.ts'
 import {
   AggregateText,
+  AverageLine,
   Band,
+  BodyWeight,
   Empty,
   Meter,
   ProvenanceSheet,
@@ -68,6 +89,13 @@ export function Today() {
 
   const totals = rollup?.totals
   const composite = store.composites.value.find((c) => c.id === logComposite)
+  const units = store.units.value
+  const floatingAdd = store.settings.value.floatingAdd !== false
+
+  function openAdd(): void {
+    if (minimal) setMinimalEntry(true)
+    else setWeighing(true)
+  }
 
   function value(key: TargetKey): number {
     return totals ? totals[key].value : 0
@@ -133,6 +161,17 @@ export function Today() {
         </div>
       )}
 
+      {/* The add control sits here, between calibration and protein: lower
+          down it scrolled out of view, and a control you cannot see is
+          worse than one you must stretch for. */}
+      <button class="btn btn-primary btn-wide add-inline" onClick={openAdd}>
+        {minimal
+          ? 'Protein and saturated fat'
+          : isToday
+            ? 'Weigh and log'
+            : `Weigh and log to ${formatDisplayDate(store.selectedDate.value)}`}
+      </button>
+
       {/* 1. Protein — the largest element on the screen. */}
       {resolved && (
         <div class="card">
@@ -159,11 +198,11 @@ export function Today() {
                   known yet
                 </span>
               )}
-              {seven?.protein && (
-                <span class="sub">
-                  7-day average {fmt(seven.protein.value)} g over {seven.protein.days} days
-                </span>
-              )}
+              <AverageLine
+                {...(totals ? { today: totals.protein } : {})}
+                {...(seven?.protein ? { mean: seven.protein } : {})}
+                unit="g"
+              />
             </button>
           </div>
           <div style="margin-top:10px">
@@ -223,9 +262,11 @@ export function Today() {
                 <AggregateText agg={totals.kcal} unit="kcal" />
               </span>
             )}
-            {seven?.kcal && (
-              <span class="sub">7-day average {fmt(seven.kcal.value)} kcal</span>
-            )}
+            <AverageLine
+              {...(totals ? { today: totals.kcal } : {})}
+              {...(seven?.kcal ? { mean: seven.kcal } : {})}
+              unit="kcal"
+            />
           </button>
           <div style="margin-top:10px">
             <Band
@@ -243,14 +284,21 @@ export function Today() {
           <div class="stat">
             <span class="label">Weight trend</span>
             <span class="value">
-              {store.currentWeightKg.value !== undefined
-                ? `${fmt(store.currentWeightKg.value, 2)} kg`
-                : '—'}
+              {store.currentWeightKg.value !== undefined ? (
+                <BodyWeight kg={store.currentWeightKg.value} unit={units.bodyWeight} />
+              ) : (
+                '—'
+              )}
             </span>
             <span class="sub">
-              {rollup?.weightKg !== undefined
-                ? `${isToday ? "today's" : "this day's"} reading ${fmt(rollup.weightKg, 1)} kg`
-                : `no reading ${isToday ? 'today' : 'this day'}`}
+              {rollup?.weightKg !== undefined ? (
+                <>
+                  {isToday ? "today's" : "this day's"} reading{' '}
+                  <BodyWeight kg={rollup.weightKg} unit={units.bodyWeight} />
+                </>
+              ) : (
+                `no reading ${isToday ? 'today' : 'this day'}`
+              )}
             </span>
           </div>
           <div class="row" style="gap:10px">
@@ -292,6 +340,10 @@ export function Today() {
                     / {fmt(resolved.targets[key].value)} g
                   </span>
                 </span>
+                <AverageLine
+                  {...(seven?.[key] ? { mean: seven[key]! } : {})}
+                  unit="g"
+                />
               </button>
               <div style="margin-top:8px">
                 <Band
@@ -305,13 +357,13 @@ export function Today() {
         </div>
       )}
 
-      {/* 5. Fibre and saturated fat — 7-day averages against their bands. */}
-      {resolved && seven && !minimal && (seven.fibre || seven.satFat) && (
+      {/* 5. Fibre and saturated fat — the day against their bands. */}
+      {resolved && !minimal && rollup && rollup.entryCount > 0 && (
         <div class="card">
-          <div class="card-title">7-day averages</div>
           <div class="grid-2">
             {(['fibre', 'satFat'] as const).map((key) => {
-              const mean = seven[key]
+              const agg = totals![key]
+              const mean = seven?.[key]
               return (
                 <div key={key}>
                   <button class="stat explainable" onClick={() => setExplain(key)}>
@@ -319,24 +371,27 @@ export function Today() {
                       {key === 'fibre' ? 'Fibre' : 'Saturated fat'}
                     </span>
                     <span class="value" style="font-size:1.1rem">
-                      {fmt(mean?.value, 1)}
+                      {agg.knownEntries === 0
+                        ? '—'
+                        : `${agg.complete ? '' : '≥ '}${fmt(agg.value, 1)}`}
                       <span style="font-size:0.8rem;color:var(--text-dim)">
                         {' '}
                         / {fmt(resolved.targets[key].value)} {TARGET_UNITS[key]}
                       </span>
                     </span>
-                    {mean && mean.incompleteDays > 0 && (
-                      <span class="sub">
-                        over {mean.days} days with it known
+                    {mean && (
+                      <span class="sub avg-line">
+                        {fmt(mean.value, 1)} {TARGET_UNITS[key]} avg
                       </span>
                     )}
                   </button>
-                  {mean && (
+                  {agg.knownEntries > 0 && (
                     <div style="margin-top:6px">
                       <Band
-                        value={mean.value}
+                        value={agg.value}
                         target={resolved.targets[key].value}
                         isCeiling={CEILING_TARGETS.has(key)}
+                        incomplete={!agg.complete}
                       />
                     </div>
                   )}
@@ -395,13 +450,14 @@ export function Today() {
         </div>
       )}
 
-      {minimal ? (
-        <button class="btn btn-primary btn-wide" onClick={() => setMinimalEntry(true)}>
-          Protein and saturated fat
-        </button>
-      ) : (
-        <button class="btn btn-primary btn-wide" onClick={() => setWeighing(true)}>
-          {isToday ? 'Weigh and log' : `Weigh and log to ${formatDisplayDate(store.selectedDate.value)}`}
+      {/* Persists while scrolling; switch it off in settings if it reads as clutter. */}
+      {floatingAdd && (
+        <button
+          class="fab"
+          aria-label={minimal ? 'Enter protein and saturated fat' : 'Weigh and log'}
+          onClick={openAdd}
+        >
+          +
         </button>
       )}
 
@@ -534,15 +590,6 @@ function useSwipe(): {
   }
 }
 
-function lowestFidelity(
-  fidelities: readonly ('weighed' | 'portioned' | 'estimated' | 'flagged')[],
-): 'weighed' | 'portioned' | 'estimated' | 'flagged' {
-  const order = ['weighed', 'portioned', 'estimated', 'flagged'] as const
-  let worst = 0
-  for (const f of fidelities) worst = Math.max(worst, order.indexOf(f))
-  return order[worst] ?? 'weighed'
-}
-
 function ProteinDistribution() {
   const rollup = store.rollup.value
   const weightKg = store.currentWeightKg.value
@@ -630,8 +677,7 @@ function Occasions() {
             const e = entries.find((x) => x.id === id)
             if (!e) return null
             const isNested = e.fromCompositeEntryId !== undefined
-            const partial =
-              e.fidelity === 'estimated' || e.fidelity === 'flagged' || e.proxyFor !== undefined
+            const partial = ESTIMATED_FIDELITIES.has(e.fidelity) || e.proxyFor !== undefined
             return (
               <div key={id}>
                 <div
@@ -644,9 +690,16 @@ function Occasions() {
                       entryName(e)
                     )}
                     {e.proxyFor && <span class="faint"> · for {e.proxyFor.note}</span>}
+                    {!isNested && e.fidelity === 'ai_estimated' && (
+                      <span class="source-tag">estimate</span>
+                    )}
+                    {isNested && e.lineSource && e.lineSource !== 'db' && (
+                      <span class="source-tag">{e.lineSource}</span>
+                    )}
                   </span>
                   <span class="grams">
-                    {fmt(e.grams)} g · {e.nutrients.kcal === null ? '? kcal' : `${fmt(e.nutrients.kcal)} kcal`}
+                    {formatFood(e.grams, store.units.value.food)} ·{' '}
+                    {e.nutrients.kcal === null ? '? kcal' : `${fmt(e.nutrients.kcal)} kcal`}
                   </span>
                 </div>
                 {!isNested && (
@@ -684,15 +737,31 @@ function capitalise(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
+/**
+ * Body weight and waist. Either field takes either unit: a bare number is the
+ * preferred unit and a suffix overrides it, so "92.6kg" typed where pounds
+ * are preferred converts rather than fails. Storage is always kilograms and
+ * centimetres.
+ */
 function WeightSheet(props: { onClose: () => void }) {
+  const units = store.units.value
   const existing = store.rollup.value?.weightKg
-  const [kg, setKg] = useState(existing !== undefined ? String(existing) : '')
+  const existingWaist = store.day.value?.waistCm
+  const [weight, setWeight] = useState(
+    existing !== undefined ? bodyWeightInputValue(existing, units.bodyWeight) : '',
+  )
+  const [waist, setWaist] = useState(
+    existingWaist !== undefined ? waistInputValue(existingWaist, units.waist) : '',
+  )
+  const kg = parseBodyWeight(weight, units.bodyWeight)
+  const waistCm = waist.trim() === '' ? undefined : parseLength(waist, units.waist)
+  const waistInvalid = waist.trim() !== '' && waistCm === undefined
 
   async function save(): Promise<void> {
-    const v = Number(kg)
-    if (!Number.isFinite(v) || v <= 0) return
+    if (kg === undefined || waistInvalid) return
     const date = store.selectedDate.value
-    await repo.setWeight(date, v)
+    await repo.setWeight(date, kg)
+    if (waistCm !== undefined) await repo.setWaist(date, waistCm)
     await store.afterEdit([date])
     store.notify('Weight saved.')
     props.onClose()
@@ -701,24 +770,46 @@ function WeightSheet(props: { onClose: () => void }) {
   return (
     <Sheet title="Weight" onClose={props.onClose}>
       <label>
-        Kilograms
+        Weight ({BODY_WEIGHT_LABEL[units.bodyWeight]})
         <input
-          type="number"
+          type="text"
           inputMode="decimal"
-          step="0.1"
           autoFocus
-          value={kg}
-          onInput={(e) => setKg((e.target as HTMLInputElement).value)}
+          value={weight}
+          placeholder={units.bodyWeight === 'lb' ? '204.2' : '92.6'}
+          onInput={(e) => setWeight((e.target as HTMLInputElement).value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') void save()
           }}
+        />
+      </label>
+      {kg !== undefined && (
+        <div class="faint">
+          <BodyWeight kg={kg} unit={units.bodyWeight} /> — stored in kilograms.
+        </div>
+      )}
+      {weight.trim() !== '' && kg === undefined && (
+        <div class="faint">Enter a number, optionally with lb or kg.</div>
+      )}
+      <label>
+        Waist ({WAIST_LABEL[units.waist]}, optional)
+        <input
+          type="text"
+          inputMode="decimal"
+          value={waist}
+          placeholder={units.waist === 'in' ? '34' : '86'}
+          onInput={(e) => setWaist((e.target as HTMLInputElement).value)}
         />
       </label>
       <div class="faint">
         The headline figure everywhere in the app is the smoothed trend, not
         this reading. A single day's weight is mostly water.
       </div>
-      <button class="btn btn-primary btn-wide" onClick={() => void save()}>
+      <button
+        class="btn btn-primary btn-wide"
+        disabled={kg === undefined || waistInvalid}
+        onClick={() => void save()}
+      >
         Save
       </button>
     </Sheet>

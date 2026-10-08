@@ -1,9 +1,10 @@
 # typecheck -> test -> build food index -> Vite build -> deploy to Pages.
 #
-# The USDA subset is generated in CI rather than committed, which keeps the
-# repo small and the derivation reproducible. The step is optional: when no
-# FoodData Central export is available the app ships on the curated table,
-# which is the intended fallback rather than a failure.
+# The bundled food index is generated in CI rather than committed, which
+# keeps the repo small and the derivation reproducible: full Foundation and
+# SR Legacy, plus a curated slice of USDA Branded. The step is optional:
+# when no FoodData Central export is available the app ships on the curated
+# table, which is the intended fallback rather than a failure.
 
 name: Deploy
 
@@ -49,18 +50,28 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # Tier 2. Set the FDC_URL secret to a zip of the FoodData Central
-      # Foundation and SR Legacy JSON exports to include it in the build.
-      # Without it the step is skipped and the app uses tier 1 alone.
+      # The bundled index. Set FDC_URL to a zip of the FoodData Central
+      # Foundation and SR Legacy JSON exports, and optionally FDC_BRANDED_URL
+      # to the Branded Foods JSON export zip for the branded slice (it is
+      # several gigabytes, and is streamed rather than parsed whole). Without
+      # FDC_URL the step is skipped and the app uses the curated table alone.
       - name: Build USDA food index
-        if: ${{ env.FDC_URL != '' }}
         env:
           FDC_URL: ${{ secrets.FDC_URL }}
+          FDC_BRANDED_URL: ${{ secrets.FDC_BRANDED_URL }}
+        if: ${{ env.FDC_URL != '' }}
         run: |
-          mkdir -p .fdc
-          curl -sSL "$FDC_URL" -o .fdc/fdc.zip
-          unzip -q .fdc/fdc.zip -d .fdc
-          npm run build:food-index -- --input .fdc --out public/usda-subset.bin
+          mkdir -p .fdc/generic .fdc/branded
+          curl -sSL "$FDC_URL" -o .fdc/generic.zip
+          unzip -q .fdc/generic.zip -d .fdc/generic
+          BRANDED_ARGS=""
+          if [ -n "$FDC_BRANDED_URL" ]; then
+            curl -sSL "$FDC_BRANDED_URL" -o .fdc/branded.zip
+            unzip -q .fdc/branded.zip -d .fdc/branded
+            rm .fdc/branded.zip
+            BRANDED_ARGS="--branded .fdc/branded"
+          fi
+          NODE_OPTIONS=--max-old-space-size=6144 npm run build:food-index -- --input .fdc/generic $BRANDED_ARGS --out public/usda-subset.bin
 
       - name: Build
         env:

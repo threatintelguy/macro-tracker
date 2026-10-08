@@ -1,9 +1,11 @@
 /**
  * Barcode scan and lookup.
  *
- * One product code leaves the device, on an explicit user action. The result
- * is written to the local food table and served from there forever after, so
- * a given product is fetched at most once ever.
+ * One product code leaves the device, on an explicit user action -- and only
+ * when neither local storage, the bundled index nor the record of past
+ * lookups can answer. The result is written to the local food table and
+ * served from there forever after: scanning the same barcode twice makes
+ * exactly one network request, ever.
  */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
@@ -12,6 +14,7 @@ import {
   barcodeDetectorAvailable,
   isPlausibleBarcode,
   lookupBarcode,
+  resolveBarcode,
   scanFromVideo,
   type ScanStop,
 } from '../../food/barcode.ts'
@@ -95,18 +98,19 @@ export function BarcodeSheet(props: {
     setBusy(true)
     setStatus(undefined)
 
-    // Local first, always. A product is fetched at most once ever.
-    const cached = await repo.findFoodByBarcode(clean)
-    if (cached) {
-      setBusy(false)
-      setFound(cached)
-      setStatus('Already in your local table — no lookup needed.')
-      return
-    }
-
-    const result = await lookupBarcode(clean, {
-      fetch: globalThis.fetch.bind(globalThis),
-      enabled: lookupEnabled,
+    // Local first, always: stored foods, the bundled index, then the
+    // record of lookups already made. The network is the last resort.
+    const result = await resolveBarcode(clean, {
+      local: async () => repo.findFoodByBarcode(clean),
+      bundled: (c) => store.searchIndex.value.barcode(c),
+      previous: (key) => repo.getLookup(key),
+      remember: (record) => repo.putLookup(record),
+      save: (food) => store.saveLocalFood(food),
+      lookup: (c) =>
+        lookupBarcode(c, {
+          fetch: globalThis.fetch.bind(globalThis),
+          enabled: lookupEnabled,
+        }),
     })
     setBusy(false)
 
@@ -114,9 +118,9 @@ export function BarcodeSheet(props: {
       setStatus(result.message)
       return
     }
-    await repo.putFood(result.food)
-    await store.loadFoodIndex()
     setFound(result.food)
+    if (result.from === 'local') setStatus('Already in your local table — no lookup needed.')
+    if (result.from === 'bundled') setStatus('In the bundled food index — no lookup needed.')
   }
 
   return (

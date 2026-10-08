@@ -71,7 +71,8 @@ export async function collectPayload(now = Date.now()): Promise<BackupPayload> {
     days,
     entries,
     // Curated and USDA rows ship with the app; only local foods travel.
-    foods: foods.filter((f) => f.tier === 'custom' || f.tier === 'barcode'),
+    // Photos, the lookup record and the external endpoint stay on the device.
+    foods: foods.filter((f) => f.tier === 'custom' || f.tier === 'barcode' || f.tier === 'online'),
     composites,
     compositeUsage: usage,
     backups,

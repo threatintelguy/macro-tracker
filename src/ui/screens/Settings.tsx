@@ -4,7 +4,7 @@
  * Profile · goal and rate · targets with provenance, each editable and
  * resettable · phase and precision mode · composite library management ·
  * custom foods · export and import, as a matched pair · the needs-detail
- * list · offline mode · theme.
+ * list · units, per domain · estimation models · offline mode · theme.
  *
  * The goal screen refuses an unsafe rate or target at input rather than
  * accepting it and clamping later, so the app never displays a number it
@@ -64,6 +64,18 @@ import {
   precisionModeLabel,
 } from '../../domain/phase/index.ts'
 import type { PrecisionMode } from '../../domain/types.ts'
+import {
+  BODY_WEIGHT_LABEL,
+  formatBodyWeight,
+  formatBodyWeightRate,
+  heightInputValue,
+  kgToLb,
+  lbToKg,
+  parseBodyWeight,
+  parseLength,
+  type UnitPrefs,
+} from '../../domain/units.ts'
+import { EstimationSettings } from '../components/EstimationSettings.tsx'
 
 export function Settings() {
   const [editTarget, setEditTarget] = useState<TargetKey | undefined>(undefined)
@@ -75,6 +87,9 @@ export function Settings() {
   const [deleting, setDeleting] = useState<Composite | undefined>(undefined)
   const [showGoal, setShowGoal] = useState(false)
   const [storage, setStorage] = useState<StorageEstimate | undefined>(undefined)
+  const [photos, setPhotos] = useState<number | undefined>(undefined)
+  const [localFoods, setLocalFoods] = useState<number | undefined>(undefined)
+  const [waistCm, setWaistCm] = useState<number | undefined>(undefined)
 
   const profile = store.profile.value
   const settings = store.settings.value
@@ -84,6 +99,15 @@ export function Settings() {
 
   useEffect(() => {
     void capabilities.storageEstimate().then(setStorage)
+    void repo.photoCount().then(setPhotos)
+    void repo
+      .getAllFoods()
+      .then((foods) =>
+        setLocalFoods(
+          foods.filter((f) => f.tier === 'custom' || f.tier === 'barcode' || f.tier === 'online').length,
+        ),
+      )
+    void repo.latestWaistCm().then(setWaistCm)
   }, [])
 
   if (!profile) return <div class="screen">Loading…</div>
@@ -99,6 +123,13 @@ export function Settings() {
     await repo.saveSettings(next)
     store.settings.value = next
   }
+
+  // A display preference only: nothing stored is converted, so a change
+  // re-renders existing data with no migration.
+  async function setUnit<K extends keyof UnitPrefs>(key: K, value: UnitPrefs[K]): Promise<void> {
+    await patchSettings({ units: { ...units, [key]: value } })
+  }
+  const units = store.units.value
 
   return (
     <div class="screen">
@@ -227,9 +258,14 @@ export function Settings() {
             </div>
             <div style="margin-top:4px">
               {store.goal.value
-                ? `${store.goal.value.direction} · ${fmt(Math.abs(store.goal.value.targetRateKgPerWeek), 2)} kg/week`
+                ? `${store.goal.value.direction} · ${formatBodyWeightRate(Math.abs(store.goal.value.targetRateKgPerWeek), units.bodyWeight)}`
                 : 'Not set'}
             </div>
+            {store.goal.value?.targetWeightKg !== undefined && (
+              <div class="faint">
+                Target {formatBodyWeight(store.goal.value.targetWeightKg, units.bodyWeight)}
+              </div>
+            )}
           </div>
           <button class="btn btn-small" onClick={() => setShowGoal(true)}>
             {store.goal.value ? 'Change' : 'Set'}
@@ -242,14 +278,14 @@ export function Settings() {
         <div class="card-title">Profile</div>
         <div class="field-row">
           <label>
-            Height (cm)
+            Height ({units.height === 'cm' ? 'cm' : 'ft/in'})
             <input
-              type="number"
-              inputMode="decimal"
-              value={String(profile.heightCm)}
+              type="text"
+              inputMode={units.height === 'cm' ? 'decimal' : 'text'}
+              value={heightInputValue(profile.heightCm, units.height)}
               onChange={(e) => {
-                const v = Number((e.target as HTMLInputElement).value)
-                if (v > 0) void patchProfile({ heightCm: v })
+                const cm = parseLength((e.target as HTMLInputElement).value, units.height)
+                if (cm !== undefined && cm > 50 && cm < 260) void patchProfile({ heightCm: cm })
               }}
             />
           </label>
@@ -289,8 +325,8 @@ export function Settings() {
             BMI {fmt(bmi(store.currentWeightKg.value, profile.heightCm), 1)} — a weak
             signal for an active person of this height. Waist circumference, and
             waist-to-height under 0.5, are the better references
-            {store.day.value?.waistCm !== undefined &&
-              ` — currently ${fmt(waistToHeight(store.day.value.waistCm, profile.heightCm), 2)}`}
+            {waistCm !== undefined &&
+              ` — currently ${fmt(waistToHeight(waistCm, profile.heightCm), 2)}`}
             .
           </div>
         )}
@@ -309,6 +345,56 @@ export function Settings() {
         <CompositeLibrary onEdit={setEditComposite} onDelete={setDeleting} />
       </div>
 
+      {/* Units, per domain: the kitchen scale reads grams, the bathroom scale pounds. */}
+      <div class="card">
+        <div class="card-title">Units</div>
+        <UnitRow
+          label="Body weight"
+          options={[
+            ['lb', 'lb'],
+            ['kg', 'kg'],
+          ]}
+          value={units.bodyWeight}
+          onChange={(v) => void setUnit('bodyWeight', v)}
+        />
+        <UnitRow
+          label="Food portions"
+          options={[
+            ['g', 'g'],
+            ['oz', 'oz'],
+          ]}
+          value={units.food}
+          onChange={(v) => void setUnit('food', v)}
+        />
+        <UnitRow
+          label="Height"
+          options={[
+            ['ftin', 'ft/in'],
+            ['cm', 'cm'],
+          ]}
+          value={units.height}
+          onChange={(v) => void setUnit('height', v)}
+        />
+        <UnitRow
+          label="Waist"
+          options={[
+            ['in', 'in'],
+            ['cm', 'cm'],
+          ]}
+          value={units.waist}
+          onChange={(v) => void setUnit('waist', v)}
+        />
+        <div class="faint" style="margin-top:8px">
+          Display and typing only. Everything is stored in grams, kilograms and
+          centimetres, and exports stay metric with the unit in each column
+          name. Body weight always shows both units, because targets are
+          computed per kilogram. Any weight field takes either unit — "92.6kg"
+          typed where pounds are preferred is converted. Energy is always kcal.
+        </div>
+      </div>
+
+      <EstimationSettings onChanged={() => void repo.photoCount().then(setPhotos)} />
+
       {/* Privacy and network. */}
       <div class="card">
         <div class="card-title">Privacy</div>
@@ -320,6 +406,18 @@ export function Settings() {
             onChange={(e) =>
               void patchSettings({
                 barcodeLookupEnabled: (e.target as HTMLInputElement).checked,
+              })
+            }
+          />
+        </label>
+        <label class="toggle" style="margin-bottom:10px">
+          <span>Online food search</span>
+          <input
+            type="checkbox"
+            checked={settings.onlineSearchEnabled !== false}
+            onChange={(e) =>
+              void patchSettings({
+                onlineSearchEnabled: (e.target as HTMLInputElement).checked,
               })
             }
           />
@@ -337,12 +435,30 @@ export function Settings() {
           />
         </label>
         <p class="faint" style="margin:10px 0 0">
-          Exactly one outbound call exists in this app: the barcode lookup, on
-          an explicit tap. It sends one product code with no identifier, no
-          session and no cookie, and caches the result locally forever. There is
-          no analytics, no error reporting, and no third-party script or font.
-          With lookup off, this app makes no network requests after the page
-          loads.
+          Every outbound call is on an explicit tap, and none carries an
+          identifier, a session or a cookie:
+        </p>
+        <ul class="faint" style="margin:6px 0 0;padding-left:18px">
+          <li>
+            Barcode lookup — one product code, to Open Food Facts. Only when the
+            code is not already on this device; the answer is kept forever, so a
+            code is looked up at most once.
+          </li>
+          <li>
+            Search online — the words typed, to Open Food Facts and USDA
+            FoodData Central, only after local search. What you add is kept.
+          </li>
+          <li>
+            The on-device model download, once, when you ask for it.
+          </li>
+          <li>
+            Your own model endpoint, if you set one up — see Estimation above
+            for exactly what it is sent.
+          </li>
+        </ul>
+        <p class="faint" style="margin:6px 0 0">
+          There is no analytics, no error reporting, and no third-party script
+          or font. Offline mode turns every one of these off.
         </p>
       </div>
 
@@ -369,6 +485,24 @@ export function Settings() {
             </span>
           </div>
         )}
+        <div class="row-between" style="margin-top:6px">
+          <span class="muted">Food library</span>
+          <span>
+            {fmt(store.searchIndex.value.size)} foods
+            {localFoods !== undefined && ` · ${fmt(localFoods)} saved on this device`}
+          </span>
+        </div>
+        {photos !== undefined && photos > 0 && (
+          <div class="row-between" style="margin-top:6px">
+            <span class="muted">Meal photos</span>
+            <span>{fmt(photos)}</span>
+          </div>
+        )}
+        <div class="faint" style="margin-top:6px">
+          The bundled food index, saved foods, a downloaded model and photos all
+          live in this browser's storage. Persistence keeps the browser from
+          clearing it to make room.
+        </div>
         {storage?.persisted === false && (
           <button
             class="btn btn-small btn-wide"
@@ -392,6 +526,16 @@ export function Settings() {
       {/* Appearance. */}
       <div class="card">
         <div class="card-title">Appearance</div>
+        <label class="toggle" style="margin-bottom:10px">
+          <span>Floating add button on Today</span>
+          <input
+            type="checkbox"
+            checked={settings.floatingAdd !== false}
+            onChange={(e) =>
+              void patchSettings({ floatingAdd: (e.target as HTMLInputElement).checked })
+            }
+          />
+        </label>
         <div class="chip-row">
           {(['dark', 'light'] as const).map((t) => (
             <button
@@ -817,22 +961,27 @@ function GoalSheet(props: { onClose: () => void }) {
   const [direction, setDirection] = useState<'loss' | 'maintain' | 'gain'>(
     existing?.direction ?? 'loss',
   )
-  const [rate, setRate] = useState(
-    String(Math.abs(existing?.targetRateKgPerWeek ?? 0.35)),
-  )
+  const unit = store.units.value.bodyWeight
+  const toShown = (kg: number): string =>
+    String(Math.round((unit === 'lb' ? kgToLb(kg) : kg) * 100) / 100)
+  const [rate, setRate] = useState(toShown(Math.abs(existing?.targetRateKgPerWeek ?? 0.35)))
   const [targetWeight, setTargetWeight] = useState(
-    existing?.targetWeightKg !== undefined ? String(existing.targetWeightKg) : '',
+    existing?.targetWeightKg !== undefined ? toShown(existing.targetWeightKg) : '',
   )
 
+  // Either unit is accepted; a suffix overrides the preference. The goal is
+  // stored in kilograms.
+  const rateKg = parseBodyWeight(rate, unit) ?? (Number(rate) === 0 ? 0 : Number.NaN)
+  const targetKg = targetWeight.trim() === '' ? undefined : parseBodyWeight(targetWeight, unit)
   const signedRate =
-    direction === 'maintain' ? 0 : direction === 'loss' ? -Number(rate) : Number(rate)
+    direction === 'maintain' ? 0 : direction === 'loss' ? -rateKg : rateKg
 
   const validation = validateGoal({
     direction,
     rateKgPerWeek: signedRate,
     currentWeightKg: weightKg,
     heightCm: profile.heightCm,
-    ...(targetWeight.trim() !== '' ? { targetWeightKg: Number(targetWeight) } : {}),
+    ...(targetWeight.trim() !== '' ? { targetWeightKg: targetKg ?? Number.NaN } : {}),
     ...(resolved
       ? {
           plannedKcal: resolved.targets.kcal.value,
@@ -848,9 +997,7 @@ function GoalSheet(props: { onClose: () => void }) {
       targetRateKgPerWeek: signedRate,
       startDate: today(),
       anchorWeightKg: weightKg,
-      ...(targetWeight.trim() !== ''
-        ? { targetWeightKg: Number(targetWeight) }
-        : {}),
+      ...(targetKg !== undefined ? { targetWeightKg: targetKg } : {}),
       active: true,
       createdAt: Date.now(),
     })
@@ -876,23 +1023,25 @@ function GoalSheet(props: { onClose: () => void }) {
 
       {direction !== 'maintain' && (
         <label>
-          Rate (kg per week)
+          Rate ({BODY_WEIGHT_LABEL[unit]} per week)
           <input
-            type="number"
+            type="text"
             inputMode="decimal"
-            step="0.05"
             value={rate}
             onInput={(e) => setRate((e.target as HTMLInputElement).value)}
           />
         </label>
       )}
 
+      {direction !== 'maintain' && Number.isFinite(rateKg) && rateKg > 0 && (
+        <div class="faint">{formatBodyWeightRate(rateKg, unit)}</div>
+      )}
+
       <label>
-        Target weight (kg, optional)
+        Target weight ({BODY_WEIGHT_LABEL[unit]}, optional)
         <input
-          type="number"
+          type="text"
           inputMode="decimal"
-          step="0.5"
           value={targetWeight}
           onInput={(e) => setTargetWeight((e.target as HTMLInputElement).value)}
         />
@@ -908,9 +1057,14 @@ function GoalSheet(props: { onClose: () => void }) {
         </div>
       )}
 
+      {targetKg !== undefined && (
+        <div class="faint">{formatBodyWeight(targetKg, unit)}</div>
+      )}
+
       <div class="faint">
         Loss is limited to {CLAMPS.maxLossRatePctPerWeek}% of body weight per
-        week and gain to {CLAMPS.maxGainRateLbPerWeek} lb per week. These are
+        week and gain to {CLAMPS.maxGainRateLbPerWeek} lb (
+        {fmt(lbToKg(CLAMPS.maxGainRateLbPerWeek), 2)} kg) per week. These are
         refused here rather than accepted and quietly adjusted later.
       </div>
 
@@ -1053,5 +1207,30 @@ function BackupSheet(props: { onClose: () => void }) {
         adjustment history, so it is not a backup. Notes travel intact.
       </div>
     </Sheet>
+  )
+}
+
+function UnitRow<T extends string>(props: {
+  label: string
+  options: readonly (readonly [T, string])[]
+  value: T
+  onChange: (v: T) => void
+}) {
+  return (
+    <div class="row-between" style="margin-bottom:8px">
+      <span class="muted">{props.label}</span>
+      <div class="chip-row">
+        {props.options.map(([v, label]) => (
+          <button
+            key={v}
+            class="chip"
+            aria-pressed={props.value === v}
+            onClick={() => props.onChange(v)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }

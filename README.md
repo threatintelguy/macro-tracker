@@ -37,12 +37,26 @@ usable weighed tracker with the full composite system.
 | Daily notes | On every day; marked on the charts; searchable from Trends |
 | Phase 2 engine | Observed TDEE (21-day window), the three-week adjustment rule with suppressors and an append-only audit log, the calibration gate, and the precision-mode switcher with a minimal-mode layout |
 
+### Addendum 2
+
+| Change | Notes |
+| --- | --- |
+| Food library | Bundled core: full Foundation and SR Legacy plus a curated slice of USDA Branded, built in CI. **Search online** (Open Food Facts and FoodData Central) on an explicit tap after local results; every accepted result is written locally for good. Ranking: curated, previously logged, local, generic, branded; branded never outranks a generic food for a query that names no brand; near-duplicates collapse with alternatives under a disclosure |
+| Barcodes | Local table, then the bundled index's GTINs, then the record of past lookups — including misses — before the network. The same code is looked up at most once, ever |
+| Hybrid AI estimation | A description (plus optional photo and pinned weighed parts) becomes a draft: the model proposes components, the library prices them, the preparation allowance is its own line. Mandatory line-by-line review; accepting saves a reusable composite. `ai_estimated` fidelity, with tier and model recorded; included in trends, excluded from observed TDEE |
+| Model hosting | On-device Llama 3.2 3B (1B on constrained devices) via WebLLM on WebGPU, downloaded on consent, cached in OPFS, grammar-constrained JSON. Optional bring-your-own OpenAI-compatible endpoint, off until configured. Fallback: external → on-device → manual |
+| Label OCR | Tesseract.js, bundled and offline. Every parsed value is confirmed before saving; partial reads land in "enter only what you know" |
+| Plate photos | Only with an external endpoint; compressed to ~1024 px, kept on the entry, deletable singly or all at once |
+| Units | Per domain — body weight lb/kg, food g/oz, height ft·in/cm, waist in/cm. Display and input only; storage stays metric. Body weight always shows both units. Any weight field takes either unit by suffix |
+| Today | Today's figures primary, the 7-day average a quiet second line. The add control sits between calibration and protein, with a floating button that persists while scrolling |
+
+Schema version 3. An Addendum 1 export still imports.
+
 Still **not** here:
 
 - The rest of the six analytics views (the protein heatmap, weekly comparison) and the weekly narrative (phase 3)
-- Free-text estimated entry (phase 4)
 - Automatic calibration extensions and the recalibration proposals; the gate is reported and the user moves phase
-- The on-device LLM (section 9, deferred) and the native wrapper (phase 6)
+- On-device vision, and the native wrapper (phase 6)
 
 The data model, the `Fidelity` field, the `phase`/`precisionMode` fields on
 `DayRecord`, the provenance shape, and `src/platform/` all exist now so those
@@ -67,23 +81,35 @@ npm test
 npm run build
 ```
 
-### The USDA subset (optional)
+### The bundled food index (optional)
 
-Tier 2 is a build artefact and is not committed. Download the FoodData Central
-**Foundation Foods** and **SR Legacy** JSON exports from
-<https://fdc.nal.usda.gov/download-datasets.html>, unzip them into one
-directory, then:
+A build artefact, not committed. Download the FoodData Central
+**Foundation Foods** and **SR Legacy** JSON exports, and optionally
+**Branded Foods**, from <https://fdc.nal.usda.gov/download-datasets.html>,
+unzip them, then:
 
 ```bash
-npm run build:food-index -- --input ./fdc-json --out public/usda-subset.bin
+npm run build:food-index -- --input ./fdc-generic --branded ./fdc-branded --out public/usda-subset.bin
 ```
 
-The Branded dataset is excluded on purpose: it is label-derived rather than
-lab-verified, it is most of FoodData Central's size, and it duplicates what
-barcode lookup handles on demand.
+The generic datasets go in whole. The Branded export is several gigabytes and
+is streamed; only a slice is kept (`--branded-max`, default 45,000): current
+US products with a full macro panel, one per GTIN, ranked by how common the
+product type and the brand are — selected by frequency, not completeness.
+Unreported nutrients stay unknown in the index, never zero.
 
-Without this file the app runs on the curated table, custom foods and barcode
-results. The loader treats an absent subset as an empty tier, never an error.
+Without this file the app runs on the curated table, custom foods and cached
+lookups. The loader treats an absent index as an empty tier, never an error.
+
+### The on-device model
+
+Nothing to build. WebLLM downloads the weights on the user's consent from the
+publisher's repositories named in its own catalogue (Hugging Face `mlc-ai`,
+model libraries from `mlc-ai/binary-mlc-llm-libs`) and caches them in OPFS.
+To serve them from somewhere else, set `VITE_MODEL_BASE_URL` at build time to
+a host laid out like Hugging Face (`<base>/<model-id>/resolve/main/<file>`)
+that sends CORS headers. GitHub Release assets do not work for this: they
+send no CORS headers, so a browser cannot fetch them.
 
 ## Layout
 
@@ -97,7 +123,8 @@ src/
 │   ├── phase/       calibration progress
 │   └── analytics/   rollups, occasions, rolling averages
 ├── data/            Dexie schema, migrations, repositories
-├── food/            tier resolution, registry, search index, barcode
+├── food/            registry, search and ranking, bundled index, barcode, online search, label OCR
+├── estimate/        hybrid estimation pipeline, on-device and external tiers, fallback chain
 ├── platform/        Capabilities interface — the wrapper door
 └── export/          encryption, CSV, backup, import validation and merge planning
 ```
@@ -131,18 +158,37 @@ broken buttons.
   the adjustment rule and its suppressors, and edits that append notes to
   past decisions rather than rewriting them.
 - **Lint rule** — no banned word (*streak*, *cheat*, *burn off*, *earn back*) in
-  any user-facing string, and exactly one outbound host in the whole source.
+  any user-facing string; exactly the known outbound hosts in the source; and
+  `fetch` called only from the audited modules.
+- **Addendum 2** — units parsing and dual display; generic-over-branded
+  ranking at several thousand foods; duplicate collapse; the v2 index format
+  and the streaming reader; one network request per barcode, ever; the
+  estimate pipeline (library over model, pins never overwritten, the
+  preparation allowance always separate, model output bounded); the exact
+  outbound request body; the fallback chain; estimated days kept out of a
+  mixed TDEE window; label parsing; the v3 migration and a round trip
+  carrying the new fidelity and source fields.
 
 ## Privacy
 
-Exactly one outbound call exists in normal operation: the barcode lookup, on an
-explicit tap. It sends one product code with `credentials: 'omit'` and no
-referrer, and caches the result locally forever, so a product is fetched at most
-once ever. A global offline switch hard-disables it.
+Every outbound call is on an explicit tap, sends `credentials: 'omit'` and no
+referrer, and is hard-disabled by the offline switch:
 
-No analytics, no error reporting, no CDN fonts, scripts, or styles. A strict CSP
-allows `self` plus the Open Food Facts hosts, so an accidental third-party
-request fails loudly in development rather than silently in production.
+- **Barcode lookup** — one product code, to Open Food Facts, only when neither
+  local storage, the bundled index nor a past lookup can answer.
+- **Search online** — the query string alone, to Open Food Facts and USDA
+  FoodData Central (with api.data.gov's shared `DEMO_KEY`), only after local
+  search. Accepted results are kept locally.
+- **The on-device model download** — once, on consent.
+- **The optional external endpoint** — the fixed instruction, the meal
+  description, any pinned weights and the photo if attached. Never the
+  profile, weight, targets, history, other entries or an identifier. The key
+  lives in IndexedDB (not a hardware keystore) and never goes in a backup.
+
+No analytics, no error reporting, no CDN fonts, scripts, or styles. Because the
+external endpoint is whatever URL the user configures, the CSP's `connect-src`
+allows https; the host allowlist lives in `tests/lint.test.ts` instead, which
+fails the build on any new host or any `fetch` outside the audited modules.
 
 **The honest risk:** device-only storage removes every cloud risk and introduces
 one — this app holds the only copy. Browser storage is evictable and is

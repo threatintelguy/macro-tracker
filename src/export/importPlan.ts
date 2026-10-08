@@ -22,6 +22,7 @@ import type {
   CompositeId,
   DayRecord,
   Entry,
+  Fidelity,
   FoodItem,
   FoodRef,
   LocalDate,
@@ -30,7 +31,7 @@ import type {
   Phase,
   PrecisionMode,
 } from '../domain/types.ts'
-import { NUTRIENT_KEYS } from '../domain/types.ts'
+import { FIDELITIES, NUTRIENT_KEYS } from '../domain/types.ts'
 import { isLocalDate } from '../domain/dates.ts'
 import { SCHEMA_VERSION } from '../domain/schema.ts'
 import {
@@ -749,10 +750,9 @@ export function parseEntryCsv(
       return
     }
     const fid = col('fidelity')
-    const fidelity =
-      fid === 'weighed' || fid === 'portioned' || fid === 'estimated' || fid === 'flagged'
-        ? fid
-        : 'estimated'
+    const fidelity: Fidelity = (FIDELITIES as readonly string[]).includes(fid)
+      ? (fid as Fidelity)
+      : 'estimated'
     const nutrients = {} as NutrientVector
     for (const k of NUTRIENT_KEYS) {
       const cell = col(NUTRIENT_CSV_COLUMNS[k])

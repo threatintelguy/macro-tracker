@@ -29,7 +29,16 @@ export type SeriesSpec = {
   /** 0–1. Lower for lower-confidence series. */
   alpha?: number
   dash?: number[]
+  /** Legend text for a value, overriding `dp` and `unit`. */
+  format?: (v: number) => string
 }
+
+/**
+ * A second axis on the right showing the left scale in another unit -- the
+ * weight chart labels the primary axis in the preferred unit and the
+ * opposite axis in the other.
+ */
+export type AltAxis = { convert: (v: number) => number; unit: string; dp?: number }
 
 export type Marker = { date: LocalDate; kind: 'note' | 'adjustment' }
 
@@ -53,6 +62,7 @@ export function TimeChart(props: {
   markers?: Marker[]
   onMarker?: (m: Marker) => void
   height?: number
+  altAxis?: AltAxis
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -79,6 +89,7 @@ export function TimeChart(props: {
     const noteColor = cssColor('--text-dim', '#9aa5b5')
     const adjColor = cssColor('--accent', '#7aa2f7')
     const usesRight = props.series.some((s) => s.scale === 'right')
+    const alt = !usesRight ? props.altAxis : undefined
 
     const axis = (scale: string, side: 0 | 1): uPlot.Axis => ({
       scale,
@@ -106,6 +117,18 @@ export function TimeChart(props: {
         },
         axis('left', 0),
         ...(usesRight ? [axis('right', 1)] : []),
+        ...(alt
+          ? [
+              {
+                ...axis('left', 1),
+                values: (_u: uPlot, splits: number[]) =>
+                  splits.map((v) => alt.convert(v).toFixed(alt.dp ?? 0)),
+                label: alt.unit,
+                labelSize: 14,
+                labelFont: '11px system-ui',
+              },
+            ]
+          : []),
       ],
       series: [
         { label: 'Date' },
@@ -113,7 +136,7 @@ export function TimeChart(props: {
           const base = cssColor(s.color, '#7aa2f7')
           const color = withAlpha(base, s.alpha ?? 1)
           const value = (_u: uPlot, v: number | null): string =>
-            v == null ? '—' : `${v.toFixed(s.dp ?? 0)} ${s.unit}`.trim()
+            v == null ? '—' : s.format ? s.format(v) : `${v.toFixed(s.dp ?? 0)} ${s.unit}`.trim()
           if (s.kind === 'dots') {
             return {
               label: s.label,
@@ -203,7 +226,7 @@ export function TimeChart(props: {
       plotRef.current?.destroy()
       plotRef.current = null
     }
-  }, [props.dates, props.series, props.markers, props.height])
+  }, [props.dates, props.series, props.markers, props.height, props.altAxis])
 
   if (props.dates.length < 2) {
     return <div class="empty">Not enough days to draw yet.</div>

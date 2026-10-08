@@ -16,8 +16,9 @@
  * Edits are silent. No history, no badge.
  */
 
-import { useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import type { Entry, Fidelity, FoodItem } from '../../domain/types.ts'
+import { FIDELITIES } from '../../domain/types.ts'
 import { NAMED_OCCASIONS, fidelityLabel } from '../../domain/analytics/index.ts'
 import { nutrientsForGrams, scaleNutrients } from '../../domain/nutrition/index.ts'
 import * as repo from '../../data/repositories.ts'
@@ -25,8 +26,7 @@ import * as store from '../store.ts'
 import { Sheet, fmt } from './common.tsx'
 import { FoodPickerSheet } from './FoodPickerSheet.tsx'
 import { CompositeLogSheet } from './CompositeLogSheet.tsx'
-
-const FIDELITIES: Fidelity[] = ['weighed', 'portioned', 'estimated', 'flagged']
+import { foodInputValue, parseFoodAmount } from '../../domain/units.ts'
 
 const OCCASION_LABELS: Record<(typeof NAMED_OCCASIONS)[number], string> = {
   breakfast: 'Breakfast',
@@ -38,7 +38,8 @@ const OCCASION_LABELS: Record<(typeof NAMED_OCCASIONS)[number], string> = {
 export function EditEntrySheet(props: { entry: Entry; onClose: () => void }) {
   const e = props.entry
   const isComposite = e.source.kind === 'composite'
-  const [grams, setGrams] = useState(String(Math.round(e.grams * 10) / 10))
+  const units = store.units.value
+  const [grams, setGrams] = useState(foodInputValue(e.grams, units.food))
   const [food, setFood] = useState<FoodItem | undefined>(undefined)
   const [at, setAt] = useState(e.at ?? '')
   const [occasion, setOccasion] = useState(e.occasion ?? '')
@@ -54,8 +55,10 @@ export function EditEntrySheet(props: { entry: Entry; onClose: () => void }) {
   const deleted =
     e.source.kind === 'composite' && store.tombstoneById.value.has(e.source.compositeId)
 
-  const g = Number(grams)
-  const gramsValid = Number.isFinite(g) && g > 0
+  // Grams or ounces; a suffix overrides the preference. Stored as grams.
+  const parsedGrams = parseFoodAmount(grams, units.food)
+  const g = parsedGrams ?? e.grams
+  const gramsValid = parsedGrams !== undefined
   // What the entry will read after saving, for the preview line.
   const preview = food
     ? nutrientsForGrams(food.per100g, gramsValid ? g : e.grams)
@@ -161,9 +164,9 @@ export function EditEntrySheet(props: { entry: Entry; onClose: () => void }) {
             </button>
           </div>
           <label>
-            Grams
+            Amount ({units.food})
             <input
-              type="number"
+              type="text"
               inputMode="decimal"
               value={grams}
               onInput={(ev) => setGrams((ev.target as HTMLInputElement).value)}
@@ -176,6 +179,15 @@ export function EditEntrySheet(props: { entry: Entry; onClose: () => void }) {
           </div>
         </>
       )}
+
+      {e.estimateSource && (
+        <div class="faint">
+          Estimated by {e.estimateSource.model}{' '}
+          {e.estimateSource.tier === 'on-device' ? 'on this device' : 'at your endpoint'} on{' '}
+          {new Date(e.estimateSource.at).toLocaleDateString()}.
+        </div>
+      )}
+      {e.photoRef && <EntryPhoto id={e.photoRef} onDeleted={props.onClose} />}
 
       <div class="field-row">
         <label>
@@ -208,7 +220,9 @@ export function EditEntrySheet(props: { entry: Entry; onClose: () => void }) {
       <div>
         <div class="card-title">How it was measured</div>
         <div class="chip-row">
-          {FIDELITIES.map((f) => (
+          {/* A model estimate is recorded by the estimate flow, with its
+              provenance; it is never something to pick by hand. */}
+          {FIDELITIES.filter((f) => f !== 'ai_estimated' || e.fidelity === 'ai_estimated').map((f) => (
             <button
               key={f}
               class="chip"
@@ -244,5 +258,45 @@ export function EditEntrySheet(props: { entry: Entry; onClose: () => void }) {
         />
       )}
     </Sheet>
+  )
+}
+
+/** A plate photo attached to an entry: kept for correcting the estimate, deletable. */
+function EntryPhoto(props: { id: string; onDeleted: () => void }) {
+  const [url, setUrl] = useState<string | undefined>(undefined)
+  const [missing, setMissing] = useState(false)
+
+  useEffect(() => {
+    let objectUrl: string | undefined
+    void repo.getPhoto(props.id).then((blob) => {
+      if (!blob) {
+        setMissing(true)
+        return
+      }
+      objectUrl = URL.createObjectURL(blob)
+      setUrl(objectUrl)
+    })
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [props.id])
+
+  if (missing) return null
+  return (
+    <div style="display:flex;flex-direction:column;gap:6px">
+      {url && <img class="photo-thumb" src={url} alt="The meal as photographed" />}
+      <button
+        class="btn btn-small btn-ghost"
+        onClick={() =>
+          void repo.deletePhoto(props.id).then(async () => {
+            store.notify('Photo deleted.')
+            await store.refreshDay()
+            props.onDeleted()
+          })
+        }
+      >
+        Delete photo
+      </button>
+    </div>
   )
 }

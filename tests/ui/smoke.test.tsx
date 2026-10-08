@@ -126,14 +126,15 @@ describe('boot', () => {
 })
 
 describe('Today', () => {
-  it('shows protein against target, with the 7-day average', async () => {
+  it("shows today's protein against target, with the 7-day average as a quiet second line", async () => {
     await seedProfile()
     await seedDayWithFood()
     await boot()
 
     expect(text()).toContain('Protein')
     expect(text()).toContain('Calories')
-    expect(text()).toContain('7-day average')
+    expect(text()).toContain('g today ·')
+    expect(text()).toContain('g avg')
 
     // Protein appears before calories in the document order.
     const body = text()
@@ -210,8 +211,9 @@ describe('Settings', () => {
     await seedProfile()
     await boot()
     await goTo('settings', 'Privacy')
-    expect(text()).toContain('one outbound call')
+    expect(text()).toContain('Every outbound call is on an explicit tap')
     expect(text()).toContain('no analytics')
+    expect(text()).toContain('Offline mode turns every one of these off')
   })
 
   it('warns that the app holds the only copy', async () => {
@@ -470,5 +472,103 @@ describe('Settings: import beside export', () => {
     expect(text()).toContain('Precision mode')
     expect(text()).toContain('Most used')
     expect(text()).toContain('Not used lately')
+  })
+})
+
+// --- Addendum 2 -------------------------------------------------------------
+
+describe('Today: today shows today, and the add control is in reach', () => {
+  it('puts the add control between the calibration widget and protein', async () => {
+    await seedProfile()
+    await seedDayWithFood()
+    await boot()
+    const body = text()
+    const calibration = body.indexOf('Calibration')
+    const add = body.indexOf('Weigh and log')
+    const protein = body.indexOf('Protein')
+    expect(calibration).toBeGreaterThanOrEqual(0)
+    expect(calibration).toBeLessThan(add)
+    expect(add).toBeLessThan(protein)
+  })
+
+  it('keeps a floating add button, unless switched off', async () => {
+    await seedProfile()
+    await boot()
+    expect(host.querySelector('.fab')).not.toBeNull()
+    render(null, host)
+    await repo.saveSettings({ ...defaultSettings(), floatingAdd: false })
+    store.ready.value = false
+    await boot()
+    expect(host.querySelector('.fab')).toBeNull()
+  })
+
+  it("shows today's figures for fibre and saturated fat, with the average beneath", async () => {
+    await seedProfile()
+    await seedDayWithFood()
+    await boot()
+    expect(text()).not.toContain('7-day averages')
+    expect(text()).toContain('Fibre')
+    expect(text()).toContain('g avg')
+  })
+
+  it('shows body weight in both units, preferred first', async () => {
+    await seedProfile()
+    await boot()
+    // 85 kg with the default pound preference.
+    expect(text()).toContain('187.4 lb (85.0 kg)')
+  })
+
+  it('never colours an intake band red and never says over or under', async () => {
+    await seedProfile()
+    await seedDayWithFood()
+    await boot()
+    const body = text().toLowerCase()
+    for (const word of [' over ', ' under ', 'blown', 'missed', 'exceeded']) {
+      expect(body).not.toContain(word)
+    }
+    for (const el of host.querySelectorAll('.band-fill')) {
+      expect((el as HTMLElement).style.background).not.toMatch(/red|#f00|rgb\(255, 0, 0\)/)
+    }
+  })
+})
+
+describe('no model, no network: still works', () => {
+  it('hides online search in offline mode and keeps the manual routes', async () => {
+    await seedProfile()
+    const p = await repo.getProfile()
+    await repo.saveProfile({ ...p!, offlineMode: true })
+    await boot()
+    await goTo('log', 'Search a single food')
+    const input = host.querySelector('input[placeholder="Search foods"]') as HTMLInputElement
+    input.value = 'zzqqxx nothing like this'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await until(() => text().includes('Four ways to log it anyway'), 'routes')
+    expect(text()).not.toContain('Search online for')
+    expect(text()).toContain('Offline mode is on')
+  })
+
+  it('offers the manual routes from Estimate when no model is set up', async () => {
+    await seedProfile()
+    await boot()
+    await goTo('log', 'Estimate a meal')
+    button('Estimate a meal').click()
+    await until(() => text().includes('No model is set up'), 'estimate sheet')
+    expect(text()).toContain('Build it from ingredients')
+    expect(text()).toContain('Enter only what you know')
+    // No photo capture without an external endpoint: absent, not failing.
+    expect(text()).not.toContain('Add a photo')
+  })
+
+  it('offers online search only on a tap, after local results', async () => {
+    await seedProfile()
+    await boot()
+    await goTo('log', 'Search a single food')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const input = host.querySelector('input[placeholder="Search foods"]') as HTMLInputElement
+    input.value = 'oats'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await until(() => text().includes('Search online for'), 'online search offer')
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
   })
 })

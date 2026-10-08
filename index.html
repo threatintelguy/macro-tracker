@@ -6,9 +6,16 @@
     <meta name="theme-color" content="#12151a" />
     <meta name="referrer" content="no-referrer" />
     <!--
-      Strict CSP: 'self' plus exactly the barcode lookup hosts. An accidental
-      third-party request fails loudly in development rather than silently in
-      production. No CDN fonts, scripts, or styles.
+      CSP. Scripts, styles, fonts and workers: 'self' only -- no CDN anything.
+      'wasm-unsafe-eval' lets WebAssembly compile (label OCR and the
+      on-device model) without permitting eval of JavaScript.
+
+      connect-src cannot be a host list any more: the optional external model
+      endpoint is whatever URL the user configures, so it allows https. The
+      host allowlist moved into the code instead -- tests/lint.test.ts fails
+      the build if a source file names any host beyond the known set, or
+      calls fetch outside the audited modules -- and every outbound call is
+      on an explicit tap and off in offline mode.
 
       frame-ancestors is deliberately absent: it is ignored when delivered in
       a meta element, and GitHub Pages cannot set response headers. Pair this
@@ -17,7 +24,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://world.openfoodfacts.org https://images.openfoodfacts.org; object-src 'none'; base-uri 'self'; form-action 'none'"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'"
     />
     <title>Macro Tracker</title>
     <link rel="icon" href="/icon-192.png" />

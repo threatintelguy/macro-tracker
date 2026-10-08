@@ -33,7 +33,7 @@ import { TDEE_WINDOW_DAYS, windowFor } from '../../domain/engine/tdee.ts'
 import { currentWindowEnd } from '../../data/engine.ts'
 import { Empty, fmt } from '../components/common.tsx'
 import { TimeChart, type Marker, type SeriesSpec } from '../components/TimeChart.tsx'
-import { useNotes, type Horizon } from '../components/WeightChart.tsx'
+import { useNotes, weightDisplay, type Horizon } from '../components/WeightChart.tsx'
 
 export function Trends() {
   const [horizon, setHorizon] = useState<Horizon>(90)
@@ -61,28 +61,36 @@ export function Trends() {
     ]
   }, [notes, events, start, end])
 
+  const weightUnit = store.units.value.bodyWeight
   const weightSeries = useMemo<SeriesSpec[]>(() => {
+    const display = weightDisplay(weightUnit)
     const byDate = new Map(trend.map((p) => [p.date, p]))
     const est = new Map(estimates.filter((e) => e.sufficient).map((e) => [e.windowEnd, e.kcal]))
     const series = buildSeries(rollups, start, end)
     return [
       {
         label: 'Trend',
-        values: dates.map((d) => byDate.get(d)?.trend ?? null),
+        values: dates.map((d) => {
+          const t = byDate.get(d)?.trend
+          return t === undefined ? null : display.toDisplay(t)
+        }),
         color: '--accent',
         kind: 'line',
         scale: 'left',
-        unit: 'kg',
-        dp: 2,
+        unit: weightUnit,
+        format: display.format,
       },
       {
         label: 'Reading',
-        values: dates.map((d) => byDate.get(d)?.raw ?? null),
+        values: dates.map((d) => {
+          const r = byDate.get(d)?.raw
+          return r === undefined ? null : display.toDisplay(r)
+        }),
         color: '--text-faint',
         kind: 'dots',
         scale: 'left',
-        unit: 'kg',
-        dp: 1,
+        unit: weightUnit,
+        format: display.format,
       },
       {
         label: 'Expenditure',
@@ -106,7 +114,7 @@ export function Trends() {
         alpha: 0.6,
       },
     ]
-  }, [trend, estimates, rollups, dates, start, end])
+  }, [trend, estimates, rollups, dates, start, end, weightUnit])
 
   const intakeSeries = useMemo(() => {
     const series = buildSeries(rollups, start, end)
@@ -120,11 +128,26 @@ export function Trends() {
       return [
         {
           label: 'Day',
-          values: values.map((v, i) => (v !== undefined && complete[i] ? v : null)),
+          values: values.map((v, i) =>
+            v !== undefined && complete[i] && !series.aiEstimated[i] ? v : null,
+          ),
           color,
           kind: 'dots',
           scale: 'left',
           unit,
+        },
+        {
+          // Days with a model estimate: included in every trend, drawn
+          // lighter -- a distinction, never a warning colour.
+          label: 'Estimated',
+          values: values.map((v, i) =>
+            v !== undefined && complete[i] && series.aiEstimated[i] ? v : null,
+          ),
+          color,
+          kind: 'dots',
+          scale: 'left',
+          unit,
+          alpha: 0.55,
         },
         {
           // Days with unknown values: included, drawn fainter, and read as floors.
@@ -217,8 +240,10 @@ export function Trends() {
           height={170}
         />
         <div class="faint" style="margin-top:8px">
-          Fainter dots are days with something logged as unknown: the figure is
-          a floor, and the 7-day line leaves those days out.
+          Lighter dots are days that include a model estimate; they count in
+          every trend here. Fainter dots are days with something logged as
+          unknown: the figure is a floor, and the 7-day line leaves those days
+          out.
         </div>
       </div>
 

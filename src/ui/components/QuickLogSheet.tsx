@@ -18,6 +18,7 @@ import * as repo from '../../data/repositories.ts'
 import * as store from '../store.ts'
 import { formatTime } from '../../domain/dates.ts'
 import { Sheet, fmt } from './common.tsx'
+import { foodInputValue, formatFood, parseFoodAmount } from '../../domain/units.ts'
 
 export function QuickLogSheet(props: {
   food: FoodItem
@@ -28,12 +29,17 @@ export function QuickLogSheet(props: {
   const isProxy = props.proxyFor !== undefined
   // A custom food saved from a serving starts at that serving.
   const firstPortion = props.food.tier === 'custom' ? props.food.portions[0] : undefined
-  const [grams, setGrams] = useState(String(firstPortion?.grams ?? 100))
+  const units = store.units.value
+  const [grams, setGrams] = useState(
+    firstPortion ? `${firstPortion.grams} g` : foodInputValue(100, units.food),
+  )
   const [fidelity, setFidelity] = useState<Fidelity>(isProxy ? 'estimated' : 'weighed')
   const [proxyNote, setProxyNote] = useState(props.proxyFor ?? '')
 
-  const g = Number(grams)
-  const valid = Number.isFinite(g) && g > 0
+  // Grams or ounces; a suffix overrides the preference. Stored as grams.
+  const parsed = parseFoodAmount(grams, units.food)
+  const g = parsed ?? 0
+  const valid = parsed !== undefined
   const nutrients = valid
     ? nutrientsForGrams(props.food.per100g, g)
     : props.food.per100g
@@ -81,9 +87,9 @@ export function QuickLogSheet(props: {
       )}
 
       <label>
-        Grams{isProxy ? ' (a guess is fine)' : ''}
+        Amount ({units.food}){isProxy ? ' — a guess is fine' : ''}
         <input
-          type="number"
+          type="text"
           inputMode="decimal"
           autoFocus
           value={grams}
@@ -105,9 +111,9 @@ export function QuickLogSheet(props: {
               <button
                 key={p.label}
                 class="chip"
-                aria-pressed={fidelity === 'portioned' && Number(grams) === p.grams}
+                aria-pressed={fidelity === 'portioned' && parsed === p.grams}
                 onClick={() => {
-                  setGrams(String(p.grams))
+                  setGrams(`${p.grams} g`)
                   if (!isProxy) setFidelity('portioned')
                 }}
               >
@@ -153,7 +159,7 @@ export function QuickLogSheet(props: {
       </div>
 
       <button class="btn btn-primary btn-wide" disabled={!valid} onClick={() => void log()}>
-        Log {fmt(g)} g
+        Log {formatFood(g, units.food)}
       </button>
     </Sheet>
   )

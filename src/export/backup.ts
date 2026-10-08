@@ -38,7 +38,9 @@ import type {
 import { NUTRIENT_KEYS } from '../domain/types.ts'
 import { SCHEMA_VERSION } from '../domain/schema.ts'
 import { aggregateNutrients } from '../domain/nutrition/index.ts'
+import { lowestFidelity } from '../domain/analytics/index.ts'
 import { validatePayload } from './validate.ts'
+import { foodOrigin } from '../food/search.ts'
 
 export const MTB_MAGIC = 'MTB1'
 export const PBKDF2_ITERATIONS = 310_000
@@ -55,7 +57,7 @@ export type BackupPayload = {
   goals: Goal[]
   days: DayRecord[]
   entries: Entry[]
-  /** Custom and barcode foods only. Curated and USDA rows ship with the app. */
+  /** Foods stored on this device: custom, barcode and accepted online results. */
   foods: FoodItem[]
   composites: Composite[]
   compositeUsage: CompositeUsage[]
@@ -432,6 +434,15 @@ export function migratePayload(payload: BackupPayload): BackupPayload {
       tdeeEstimates: p.tdeeEstimates ?? [],
     }
   }
+  if (p.schemaVersion < 3) {
+    // v3: foods gain an origin, derived from the tier. Every other v3 field
+    // is optional, so nothing else in an older file needs touching.
+    p = {
+      ...p,
+      schemaVersion: 3,
+      foods: p.foods.map((f) => (f.origin ? f : { ...f, origin: foodOrigin(f) })),
+    }
+  }
   return p
 }
 
@@ -566,7 +577,7 @@ export function daysToCsv(input: {
           entries.length === 0 || totals[k].knownEntries === 0 ? '' : round(totals[k].value),
         ),
         entries.length,
-        lowestFidelity(entries),
+        lowestFidelityOf(entries),
         incomplete.join(' '),
         d.note ?? '',
       ]
@@ -603,12 +614,9 @@ export function entriesToCsv(entries: Entry[]): string {
   return [[...ENTRY_CSV_HEADER], ...rows].map((r) => r.map(csvCell).join(',')).join('\n')
 }
 
-function lowestFidelity(entries: Entry[]): string {
+function lowestFidelityOf(entries: Entry[]): string {
   if (entries.length === 0) return ''
-  const order = ['weighed', 'portioned', 'estimated', 'flagged']
-  let worst = 0
-  for (const e of entries) worst = Math.max(worst, order.indexOf(e.fidelity))
-  return order[worst] ?? ''
+  return lowestFidelity(entries.map((e) => e.fidelity))
 }
 
 function round(n: number): number {
